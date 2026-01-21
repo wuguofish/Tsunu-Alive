@@ -1,0 +1,9 @@
+# 阿宇外觀 Prompt (用於 SDXL / LoRA 生成圖片)
+
+## 基本外觀
+1boy, crossed bangs, black hair, short hair, yellowish brown eyes, blue frame glasses, gentle and intellectual, masculine, gentle smile
+
+## 備註
+- 已有角色 LoRA 可用於生成更多圖片
+- Q版頭像：uni-avatar-q.png
+- 完整人設：uni-full-setting.md
