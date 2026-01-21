@@ -1,9 +1,60 @@
 <script setup lang="ts">
-import { ref, nextTick, computed } from "vue";
+import { ref, nextTick, computed, onMounted, onUnmounted } from "vue";
 import { marked, Renderer } from "marked";
 import hljs from "highlight.js";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ToolIndicator from "./components/ToolIndicator.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
+
+// Claude 事件類型定義
+interface ClaudeEvent {
+  event_type: 'Init' | 'Text' | 'ToolUse' | 'PermissionDenied' | 'ToolResult' | 'Complete' | 'Error' | 'Connected';
+  session_id?: string;
+  model?: string;
+  text?: string;
+  is_complete?: boolean;
+  tool_name?: string;
+  tool_id?: string;
+  input?: Record<string, unknown>;
+  result?: string;
+  is_error?: boolean;
+  cost_usd?: number;
+  message?: string;
+}
+
+// 待確認的權限請求
+interface PendingPermission {
+  toolName: string;
+  toolId: string;
+  input: Record<string, unknown>;
+}
+
+// 工具使用項目
+interface ToolUseItem {
+  id: string;
+  type: string;
+  name: string;
+  input: Record<string, unknown>;
+  result?: string;
+  isCancelled?: boolean;
+  userResponse?: string;  // 使用者拒絕或自訂的回應
+}
+
+// 目前的 session ID
+const sessionId = ref<string | null>(null);
+
+// 目前使用的 model
+const currentModel = ref('');
+
+// 累積的回應文字
+const streamingText = ref('');
+
+// 目前的工具使用
+const currentToolUses = ref<ToolUseItem[]>([]);
+
+// 事件監聽取消函數
+let unlistenClaude: UnlistenFn | null = null;
 
 // 自訂 renderer 來處理程式碼高亮
 const renderer = new Renderer();
@@ -89,6 +140,9 @@ const contextUsage = ref(87);
 // 斜線選單顯示狀態
 const showSlashMenu = ref(false);
 
+// 待確認的權限請求
+const pendingPermission = ref<PendingPermission | null>(null);
+
 // 對話區域的參考，用於自動滾動
 const chatContainer = ref<HTMLElement | null>(null);
 
@@ -99,6 +153,149 @@ async function scrollToBottom() {
     chatContainer.value.scrollTop = chatContainer.value.scrollHeight;
   }
 }
+
+// 加入工具使用記錄（避免重複）
+function addToolUse(toolName: string, toolId: string, input: Record<string, unknown>) {
+  // 用 tool_id 檢查是否已存在
+  const existingById = currentToolUses.value.find(t => t.id === toolId);
+  if (!existingById) {
+    // 額外檢查：如果是同類型工具且描述相同，也視為重複（stream 重複發送的情況）
+    const desc = (input?.description as string) || '';
+    const existingByContent = currentToolUses.value.find(t =>
+      t.type === toolName &&
+      (t.input?.description as string || '') === desc
+    );
+    if (!existingByContent) {
+      currentToolUses.value.push({
+        id: toolId,
+        type: toolName,
+        name: toolName,
+        input: input
+      });
+    }
+  }
+}
+
+// 處理 Claude 事件
+function handleClaudeEvent(event: ClaudeEvent) {
+  console.log('Claude event:', event);
+
+  switch (event.event_type) {
+    case 'Init':
+      // 初始化完成
+      if (event.session_id) {
+        sessionId.value = event.session_id;
+      }
+      if (event.model) {
+        currentModel.value = event.model;
+      }
+      busyStatus.value = 'Thinking...';
+      break;
+
+    case 'Text':
+      // 收到文字串流
+      if (event.text) {
+        streamingText.value += event.text;
+        // 檢查是否需要加入新的助手訊息
+        const lastMsg = messages.value[messages.value.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant') {
+          // 更新現有的助手訊息
+          lastMsg.content = streamingText.value;
+        } else {
+          // 第一次收到文字，加入新的助手訊息
+          messages.value.push({
+            role: 'assistant',
+            content: streamingText.value
+          });
+        }
+        scrollToBottom();
+      }
+      break;
+
+    case 'ToolUse':
+      // 工具使用（不需要權限確認的工具）
+      if (event.tool_name && event.tool_id) {
+        busyStatus.value = `Using ${event.tool_name}...`;
+        addToolUse(event.tool_name, event.tool_id, event.input || {});
+      }
+      break;
+
+    case 'PermissionDenied':
+      // 權限被拒絕（由 Claude CLI 的 default 權限模式回報）
+      if (event.tool_name && event.tool_id) {
+        // 更新工具使用記錄為已取消
+        const tool = currentToolUses.value.find(t => t.id === event.tool_id);
+        if (tool) {
+          tool.isCancelled = true;
+          tool.userResponse = 'Permission denied by CLI';
+        }
+      }
+      break;
+
+    case 'Connected':
+      // Claude CLI 已連線
+      busyStatus.value = 'Connected';
+      break;
+
+    case 'ToolResult':
+      // 工具結果
+      if (event.tool_id) {
+        const tool = currentToolUses.value.find(t => t.id === event.tool_id);
+        if (tool) {
+          tool.result = event.result;
+          // 如果是錯誤結果，標記為取消
+          if (event.is_error) {
+            tool.isCancelled = true;
+          }
+        }
+      }
+      break;
+
+    case 'Complete':
+      // 完成
+      isLoading.value = false;
+      avatarState.value = 'complete';
+      streamingText.value = '';
+      currentToolUses.value = [];
+
+      // 3 秒後回到待機表情
+      setTimeout(() => {
+        avatarState.value = 'idle';
+      }, 3000);
+      break;
+
+    case 'Error':
+      // 錯誤
+      isLoading.value = false;
+      avatarState.value = 'idle';
+      if (event.message) {
+        messages.value.push({
+          role: 'assistant',
+          content: `*皺眉* 抱歉，出了點問題：${event.message}`
+        });
+      }
+      break;
+  }
+}
+
+// 設定事件監聽
+async function setupEventListeners() {
+  unlistenClaude = await listen<ClaudeEvent>('claude-event', (event) => {
+    handleClaudeEvent(event.payload);
+  });
+}
+
+// 元件掛載時設定監聽
+onMounted(() => {
+  setupEventListeners();
+});
+
+// 元件卸載時清理
+onUnmounted(() => {
+  if (unlistenClaude) {
+    unlistenClaude();
+  }
+});
 
 // 送出訊息
 async function sendMessage() {
@@ -113,47 +310,30 @@ async function sendMessage() {
   userInput.value = '';
   await scrollToBottom();
 
-  // TODO: 之後這裡要串接 Claude CLI
+  // 開始載入狀態
   isLoading.value = true;
-  avatarState.value = 'processing'; // 切換到處理中表情
+  avatarState.value = 'processing';
+  busyStatus.value = 'Connecting...';
+  streamingText.value = '';
+  // 注意：不要在這裡加入空的助手訊息，等收到第一個文字時再加入
 
-  // 暫時用假回應（含 Markdown 測試）
-  setTimeout(async () => {
+  try {
+    // 呼叫 Rust 端送出訊息給 Claude CLI
+    await invoke('send_to_claude', {
+      prompt: content,
+      workingDir: null  // 使用預設目錄
+    });
+  } catch (error) {
+    console.error('Failed to send to Claude:', error);
+    isLoading.value = false;
+    avatarState.value = 'idle';
+
+    // 加入錯誤訊息
     messages.value.push({
       role: 'assistant',
-      content: `嗯，讓我想想... *輕敲鍵盤*
-
-這個問題我們可以一起看看。讓我示範一些 **Markdown** 格式：
-
-### 程式碼範例
-
-\`\`\`typescript
-function greet(name: string): string {
-  return \`你好，\${name}！\`;
-}
-
-console.log(greet("童童"));
-\`\`\`
-
-### 重點整理
-
-- 第一點：使用 \`marked\` 解析 Markdown
-- 第二點：用 \`highlight.js\` 做程式碼高亮
-- 第三點：這是假回應，之後會串接 Claude CLI
-
-> 這是一段引用文字，看起來如何？
-
-你覺得這樣的顯示效果可以嗎？`
+      content: `*皺眉* 連接 Claude 時發生錯誤：${error}`
     });
-    isLoading.value = false;
-    avatarState.value = 'complete'; // 切換到完成表情
-    await scrollToBottom();
-
-    // 3 秒後回到待機表情
-    setTimeout(() => {
-      avatarState.value = 'idle';
-    }, 3000);
-  }, 1000);
+  }
 }
 
 // 按 Enter 送出（Shift+Enter 換行）
@@ -164,18 +344,65 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-// 處理權限確認回應（測試用）
-function handlePermissionResponse(response: 'yes' | 'yes-all' | 'no' | 'custom', customMessage?: string) {
+// 處理權限確認回應
+// 注意：目前使用 -p 模式時無法進行互動式權限確認
+// 此功能保留供未來實作互動模式使用
+async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'no' | 'custom', customMessage?: string) {
   console.log('Permission response:', response, customMessage);
-  // TODO: 之後這裡要處理實際的權限確認邏輯
+
+  if (!pendingPermission.value) return;
+
+  const toolId = pendingPermission.value.toolId;
+  let userResponse: string | undefined;
+
+  switch (response) {
+    case 'no':
+      userResponse = 'Denied by user';
+      break;
+    case 'custom':
+      userResponse = customMessage;
+      break;
+  }
+
+  // 如果是拒絕或自訂回應，更新工具使用記錄
+  if (response === 'no' || response === 'custom') {
+    const tool = currentToolUses.value.find(t => t.id === toolId);
+    if (tool) {
+      tool.isCancelled = true;
+      tool.userResponse = userResponse;
+    }
+  }
+
+  // 清除待確認的權限
+  pendingPermission.value = null;
+
+  // 恢復處理狀態
+  avatarState.value = 'processing';
+  busyStatus.value = 'Processing...';
+
+  // TODO: 當實作互動模式時，這裡需要發送回應給 Claude CLI
+  // 目前 -p 模式下權限確認由 CLI 自動處理
+  console.log('Interactive permission response not yet implemented');
 }
 
 // 中斷請求
-function interruptRequest() {
+async function interruptRequest() {
   console.log('Interrupt request');
+
+  // 清除待確認的權限
+  pendingPermission.value = null;
+
+  // 呼叫 Rust 端中斷 Claude
+  try {
+    await invoke('interrupt_claude');
+  } catch (error) {
+    console.error('Failed to interrupt Claude:', error);
+  }
+
   isLoading.value = false;
   avatarState.value = 'idle';
-  // TODO: 之後這裡要處理實際的中斷邏輯
+  streamingText.value = '';
+  currentToolUses.value = [];
 }
 </script>
 
@@ -204,68 +431,32 @@ function interruptRequest() {
             ></div>
           </div>
 
-          <!-- 工具使用提示測試區域 -->
-          <div class="tool-demo">
+          <!-- 工具使用提示會在這裡動態顯示 -->
+          <template v-for="tool in currentToolUses" :key="tool.id">
             <ToolIndicator
-              type="Read"
-              path="C:\Users\ATone\.claude\skills\gget-analyzer\.agent\workflows\gget-inventory.md"
+              :type="tool.type as any"
+              :path="(tool.input?.file_path as string) || (tool.input?.path as string)"
+              :description="tool.input?.description as string"
+              :input="tool.input?.command as string"
+              :output="tool.result"
+              :isRunning="!tool.result && !tool.isCancelled"
+              :isCancelled="tool.isCancelled"
+              :userResponse="tool.userResponse"
             />
+          </template>
 
-            <ToolIndicator
-              type="Bash"
-              description="檢查 GGET 環境和資料是否就緒"
-              input='cd "C:\Users\ATone\.claude\skills\gget-analyzer" && powershell -Command "$ready"'
-              output="◆◆◆ ◆u◆◆:1 ◆r◆◆:256
-+ ... ◆◆◆◆ /gget-update-data ◆i◆◆]◆u◆I' -ForegroundColor Red;  = }; if ("
-              :exitCode="1"
-            />
-
-            <ToolIndicator
-              type="Edit"
-              path="C:\Users\ATone\.claude\skills\gget-analyzer\scripts\master_league.py"
-              summary="Added 1 line"
-              :oldCode="`import argparse
-import io
-import json
-import re
-import sys
-from dataclasses import dataclass, field
-from typing import Optional
-
-# 設定 stdout 編碼為 UTF-8
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')`"
-              :newCode="`import argparse
-import json
-import re
-import sys
-from dataclasses import dataclass, field
-from typing import Optional
-
-# 修復 Windows 終端機編碼問題
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')`"
-            />
-
-            <!-- 權限確認對話框測試 -->
-            <PermissionDialog
-              action="Edit"
-              target="D:\game\tsunu_alive\src\components\ToolIndicator.vue"
-              summary="Added 2 lines"
-              :preview="`      <!-- Edit 工具：顯示 Diff -->
-      <template v-if=&quot;type === 'Edit' && diffLines && diffLines.length > 0&quot;>
-        <div class=&quot;diff-container&quot;>
-          <div
-            v-for=&quot;(line, index) in diffLines&quot;
-            :key=&quot;index&quot;
-            :class=&quot;['diff-line', line.type]&quot;
-          >`"
-              @respond="handlePermissionResponse"
-            />
-          </div>
+          <!-- 權限確認對話框 -->
+          <PermissionDialog
+            v-if="pendingPermission"
+            :action="pendingPermission.toolName"
+            :target="(pendingPermission.input?.file_path as string) || (pendingPermission.input?.path as string) || (pendingPermission.input?.description as string) || ''"
+            :summary="(pendingPermission.input?.description as string)"
+            :preview="(pendingPermission.input?.command as string)"
+            @respond="handlePermissionResponse"
+          />
 
           <!-- 載入中指示器 -->
-          <div v-if="isLoading" class="message assistant loading">
+          <div v-if="isLoading && !pendingPermission" class="message assistant loading">
             <div class="message-content">
               <span class="typing-indicator">
                 <span></span>
@@ -432,11 +623,11 @@ body {
 }
 
 .markdown-body p {
-  margin-bottom: 0.5em;
+  margin: 0;
 }
 
-.markdown-body p:last-child {
-  margin-bottom: 0;
+.markdown-body p + p {
+  margin-top: 0.5em;
 }
 
 .markdown-body ul,
@@ -574,7 +765,6 @@ body {
 .message-content {
   padding: 12px 16px;
   border-radius: 16px;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 

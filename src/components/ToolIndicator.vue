@@ -5,6 +5,9 @@ import hljs from 'highlight.js';
 // 工具類型定義
 type ToolType = 'Read' | 'Bash' | 'Edit' | 'Write' | 'Glob' | 'Grep' | 'Task';
 
+// 執行狀態
+type ToolStatus = 'running' | 'success' | 'error' | 'cancelled';
+
 // Props 定義
 const props = defineProps<{
   type: ToolType;
@@ -18,23 +21,35 @@ const props = defineProps<{
   oldCode?: string;  // 修改前的程式碼
   newCode?: string;  // 修改後的程式碼
   summary?: string;  // 如 "Added 1 line"
+  isRunning?: boolean;  // 是否正在執行中
+  isCancelled?: boolean;  // 是否被取消
+  userResponse?: string;  // 使用者拒絕或自訂的回應內容
 }>();
 
 // 是否展開
 const isExpanded = ref(true);
 
-// 工具顏色對應
-const toolColors: Record<ToolType, string> = {
-  Read: '#e74c3c',    // 紅色
-  Bash: '#e67e22',    // 橘色
-  Edit: '#9b59b6',    // 紫色
-  Write: '#3498db',   // 藍色
-  Glob: '#1abc9c',    // 青色
-  Grep: '#2ecc71',    // 綠色
-  Task: '#f39c12',    // 金色
+// 狀態顏色對應
+const statusColors: Record<ToolStatus, string> = {
+  running: '#e67e22',   // 橘色：執行中
+  success: '#2ecc71',   // 綠色：執行成功
+  error: '#e74c3c',     // 紅色：執行失敗
+  cancelled: '#a0a0a0', // 灰色：執行取消
 };
 
-const toolColor = computed(() => toolColors[props.type] || '#a0a0a0');
+// 計算目前狀態
+const toolStatus = computed<ToolStatus>(() => {
+  if (props.isCancelled) return 'cancelled';
+  if (props.isRunning) return 'running';
+  // 有 exitCode 且不為 0 表示失敗
+  if (props.exitCode !== undefined && props.exitCode !== 0) return 'error';
+  // 有結果表示成功
+  if (props.output !== undefined || props.exitCode === 0) return 'success';
+  // 預設為執行中
+  return 'running';
+});
+
+const toolColor = computed(() => statusColors[toolStatus.value]);
 
 // 高亮程式碼（用於 Bash 輸入輸出）
 function highlightCode(code: string, lang: string = 'bash'): string {
@@ -52,7 +67,7 @@ function toggleExpand() {
   <div class="tool-indicator">
     <!-- 標題列 -->
     <div class="tool-header" @click="toggleExpand">
-      <span class="tool-dot" :style="{ backgroundColor: toolColor }"></span>
+      <span class="tool-dot" :class="{ running: toolStatus === 'running' }" :style="{ backgroundColor: toolColor }"></span>
       <span class="tool-type">{{ type }}</span>
       <span v-if="path" class="tool-path">{{ path }}</span>
       <span v-if="summary" class="tool-summary">{{ summary }}</span>
@@ -65,6 +80,11 @@ function toggleExpand() {
       <!-- Reason（如果有）-->
       <div v-if="reason" class="tool-reason">
         <span class="reason-label">Reason:</span> {{ reason }}
+      </div>
+
+      <!-- 使用者回應（權限拒絕或自訂內容）-->
+      <div v-if="userResponse" class="user-response">
+        <span class="response-label">User:</span> {{ userResponse }}
       </div>
 
       <!-- Bash 工具：顯示輸入和輸出 -->
@@ -138,6 +158,15 @@ function toggleExpand() {
   flex-shrink: 0;
 }
 
+.tool-dot.running {
+  animation: dot-pulse 1s infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
 .tool-type {
   font-weight: 600;
   color: var(--text-color);
@@ -187,6 +216,21 @@ function toggleExpand() {
 
 .reason-label {
   color: #f39c12;
+}
+
+.user-response {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background-color: rgba(160, 160, 160, 0.15);
+  border-radius: 4px;
+  border-left: 3px solid #a0a0a0;
+}
+
+.response-label {
+  color: #a0a0a0;
+  font-weight: 600;
 }
 
 .tool-block {

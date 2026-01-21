@@ -26,7 +26,16 @@
       "Bash(timeout 20 tail:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(gh repo create:*)",
+      "Bash(git config:*)",
+      "Bash(git remote add:*)",
+      "Bash(git push:*)",
+      "Bash(claude -p --output-format json)",
+      "Bash(claude -p --output-format stream-json)",
+      "Bash(claude:*)",
+      "Bash(cargo check:*)",
+      "Bash(npm info:*)"
     ]
   }
 }

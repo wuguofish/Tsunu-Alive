@@ -2,7 +2,7 @@
 import { ref } from 'vue';
 
 // Props 定義
-const props = defineProps<{
+defineProps<{
   action: string;           // 操作類型，如 "Edit"
   target: string;           // 目標，如檔案路徑
   summary?: string;         // 摘要，如 "Added 2 lines"
