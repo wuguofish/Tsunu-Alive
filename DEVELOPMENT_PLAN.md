@@ -114,21 +114,66 @@
 ### Phase 3：人設整合 🔄 進行中
 - [x] 設定專案 CLAUDE.md（精簡版人設）
 - [x] 建立 /uni Skill（完整 RP 設定）
-- [ ] 測試人設切換機制
+- [x] 測試人設切換機制
 
-### Phase 4：介面優化與權限確認 🔄 部分完成
+### Phase 4：介面優化與權限確認 ✅ 完成
 - [x] 設計對話氣泡樣式
 - [x] 加入阿宇表情變化（4種狀態：idle, processing, complete, waiting）
 - [x] 狀態列（編輯模式、檔案、Context 用量）
 - [x] 斜線選單 UI（尚未實作功能）
-- [x] PermissionDialog UI 元件
+- [x] PermissionDialog UI 元件（中文化，配合阿宇人設）
 - [x] 研究 IDE 插件權限確認機制（完成！採用「後處理」模式）
-- [ ] 實作「確認後重新執行」邏輯
-- [ ] 實作 session 白名單管理
-- [ ] 新增權限模式切換 UI
-- [ ] 優化使用者體驗
+- [x] 實作「確認後重新執行」邏輯
+- [x] 實作 session 白名單管理（採用白名單機制而非切換至 auto 模式）
+- [x] 實作專案級白名單持久化（寫入 .claude/settings.local.json）
+- [x] 新增權限模式切換 UI（循環切換，與 IDE 插件設計一致）
 
-### Phase 5：打包與發布
+### Phase 4.5：核心介面功能（高優先級）
+
+- [ ] **Context 指示器 + Compact**
+  - 顯示 context window 使用量百分比
+  - 100% 觸發自動壓縮
+  - 點擊可手動執行 `/compact`
+- [ ] **斜線選單功能實作**（目前只有 UI 外觀）
+  - `/model` - 切換 AI 模型
+  - `/compact` - 手動壓縮上下文
+  - `/usage` - 查看使用情況
+  - `/clear` - 清除對話（新對話）
+- [ ] **@-Mention 功能**
+  - `@filename.ts` - 參考檔案
+  - `@folder/` - 參考資料夾
+  - `@file.ts#5-10` - 特定行號範圍
+- [ ] **工作目錄管理**
+  - 顯示目前 Claude 工作目錄
+  - 動態取得工作目錄（目前 yes-always 的 workingDir 是寫死的）
+- [ ] **對話歷史管理**
+  - 搜尋過去對話
+  - 按時間瀏覽（Today, Yesterday, Last 7 days）
+  - 恢復過去對話
+
+### Phase 4.6：增強體驗功能（中優先級）
+
+- [ ] **快捷鍵支援**
+  - `Ctrl+Esc` / `Cmd+Esc` - 切換焦點（輸入框 ↔ 對話）
+  - `Ctrl+N` / `Cmd+N` - 開始新對話
+  - `Ctrl+Shift+Esc` - 在新標籤開啟對話
+- [ ] **Extended Thinking 切換** - 讓 Claude 花更多時間推理
+- [ ] **目前讀取的檔案顯示** - 顯示 Claude 正在讀取/編輯的檔案
+- [ ] **終端輸出參考** - `@terminal:name` 參考終端輸出
+- [ ] **多對話管理** - 新標籤、新視窗開啟對話
+
+### Phase 5：進階功能（低優先級）
+
+- [ ] **MCP 伺服器支援** - 連接外部工具、資料庫、API
+- [ ] **Hooks 設定 UI** - 設定自動化鉤子（如：編輯後自動執行測試）
+- [ ] **Memory 設定** - 設定 Claude 的記憶
+- [ ] **Git 整合**
+  - 提交變更（commit）
+  - 建立 PR
+  - 分支操作
+
+### Phase 6：打包與發布
+
 - [ ] 打包 macOS 版本
 - [ ] 測試（請收禮者協助）
 - [ ] 修正問題並完成
@@ -202,10 +247,12 @@ const allowedToolsArg = sessionAllowedTools.value.size > 0
 
 - [x] PermissionDialog 元件已建立，UI 完整
 - [x] 後端支援解析 `permission_denials` 並發送 `PermissionDenied` 事件
-- [ ] 實作「確認後重新執行」邏輯
-- [ ] 實作 session 白名單管理
-- [ ] 實作專案級白名單持久化
-- [ ] 新增權限模式切換 UI
+- [x] 實作「確認後重新執行」邏輯
+- [x] 實作 session 白名單管理
+  - 採用「白名單機制」：使用者點 "Yes, allow all this session" 後，將所有被拒絕的工具加入白名單
+  - 比起切換到 auto 模式，白名單機制提供更細緻的控制（acceptEdits 只允許檔案編輯，不含 Bash/WebSearch）
+- [x] 實作專案級白名單持久化（寫入 .claude/settings.local.json）
+- [x] 新增權限模式切換 UI（循環切換，與 IDE 插件設計一致）
 
 ## 檔案結構
 

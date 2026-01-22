@@ -260,10 +260,12 @@ pub async fn run_claude(
     prompt: String,
     working_dir: Option<String>,
     session_id: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(get_claude_path());
     cmd.arg("-p")
         .arg("--output-format")
         .arg("stream-json")
@@ -276,6 +278,20 @@ pub async fn run_claude(
     // 如果有 session_id，繼續該 session
     if let Some(sid) = &session_id {
         cmd.arg("--resume").arg(sid);
+    }
+
+    // 如果有 allowedTools，加入參數
+    if let Some(tools) = &allowed_tools {
+        if !tools.is_empty() {
+            let tools_arg = tools.join(",");
+            eprintln!("🔧 Adding --allowedTools: {}", tools_arg);
+            cmd.arg("--allowedTools").arg(&tools_arg);
+        }
+    }
+
+    // 如果有 permissionMode，加入參數
+    if let Some(mode) = &permission_mode {
+        cmd.arg("--permission-mode").arg(mode);
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
@@ -476,14 +492,35 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 .and_then(|c| c.as_f64())
                 .unwrap_or(0.0);
 
-            // 檢查是否有權限被拒絕
-            if let Some(denials) = json.get("permission_denials").and_then(|d| d.as_array()) {
+            // Debug: 印出完整的 result JSON 來檢查結構
+            eprintln!("🔍 Result JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            // 額外印出完整 JSON 以便 debug
+            eprintln!("🔍 Full result JSON: {}", serde_json::to_string_pretty(json).unwrap_or_default());
+
+            // 檢查是否有權限被拒絕（支援蛇底式和駝峰式）
+            let denials = json.get("permission_denials")
+                .or_else(|| json.get("permissionDenials"))
+                .and_then(|d| d.as_array());
+
+            if let Some(denials) = denials {
+                eprintln!("🔴 Found permission_denials: {} items", denials.len());
                 for denial in denials {
-                    if let (Some(tool_name), Some(tool_id)) = (
-                        denial.get("tool_name").and_then(|n| n.as_str()),
-                        denial.get("tool_use_id").and_then(|i| i.as_str()),
-                    ) {
-                        let input = denial.get("tool_input").cloned().unwrap_or(serde_json::Value::Null);
+                    eprintln!("🔴 Denial item: {}", serde_json::to_string_pretty(denial).unwrap_or_default());
+
+                    // 支援蛇底式和駝峰式欄位名稱
+                    let tool_name = denial.get("tool_name")
+                        .or_else(|| denial.get("toolName"))
+                        .and_then(|n| n.as_str());
+                    let tool_id = denial.get("tool_use_id")
+                        .or_else(|| denial.get("toolUseId"))
+                        .and_then(|i| i.as_str());
+                    let input = denial.get("tool_input")
+                        .or_else(|| denial.get("toolInput"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+
+                    if let (Some(tool_name), Some(tool_id)) = (tool_name, tool_id) {
+                        eprintln!("🔴 Emitting PermissionDenied: tool={}, id={}", tool_name, tool_id);
                         events.push(ClaudeEvent::PermissionDenied {
                             tool_name: tool_name.to_string(),
                             tool_id: tool_id.to_string(),
@@ -491,6 +528,8 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                         });
                     }
                 }
+            } else {
+                eprintln!("🔍 No permission_denials found in result");
             }
 
             events.push(ClaudeEvent::Complete { result, cost_usd });

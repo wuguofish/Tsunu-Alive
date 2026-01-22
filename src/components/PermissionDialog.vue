@@ -11,7 +11,7 @@ defineProps<{
 
 // Emits 定義
 const emit = defineEmits<{
-  (e: 'respond', response: 'yes' | 'yes-all' | 'no' | 'custom', customMessage?: string): void;
+  (e: 'respond', response: 'yes' | 'yes-all' | 'yes-always' | 'no' | 'custom', customMessage?: string): void;
 }>();
 
 // 自訂回應輸入
@@ -19,7 +19,7 @@ const customResponse = ref('');
 const showCustomInput = ref(false);
 
 // 處理回應
-function handleResponse(response: 'yes' | 'yes-all' | 'no') {
+function handleResponse(response: 'yes' | 'yes-all' | 'yes-always' | 'no') {
   emit('respond', response);
 }
 
@@ -60,28 +60,33 @@ function handleKeydown(e: KeyboardEvent) {
 
     <!-- 問題提示 -->
     <div class="question">
-      Make this edit to {{ target }}?
+      欸，要執行 {{ action }} 嗎？
     </div>
 
     <!-- 選項按鈕 -->
     <div class="options">
       <button class="option-btn primary" @click="handleResponse('yes')">
         <span class="option-number">1</span>
-        <span class="option-label">Yes</span>
+        <span class="option-label">好，執行</span>
       </button>
 
       <button class="option-btn" @click="handleResponse('yes-all')">
         <span class="option-number">2</span>
-        <span class="option-label">Yes, allow all edits this session</span>
+        <span class="option-label">好，這次都允許</span>
+      </button>
+
+      <button class="option-btn" @click="handleResponse('yes-always')">
+        <span class="option-number">3</span>
+        <span class="option-label">好，以後都允許（專案內）</span>
       </button>
 
       <button class="option-btn" @click="handleResponse('no')">
-        <span class="option-number">3</span>
-        <span class="option-label">No</span>
+        <span class="option-number">4</span>
+        <span class="option-label">不要</span>
       </button>
 
       <button v-if="!showCustomInput" class="option-btn custom-toggle" @click="showCustom">
-        <span class="option-label">Tell Claude what to do instead</span>
+        <span class="option-label">告訴阿宇該怎麼做</span>
       </button>
 
       <!-- 自訂輸入框 -->
@@ -89,7 +94,7 @@ function handleKeydown(e: KeyboardEvent) {
         <input
           v-model="customResponse"
           type="text"
-          placeholder="Tell Claude what to do instead"
+          placeholder="告訴阿宇該怎麼做..."
           class="custom-input"
           @keydown="handleKeydown"
           autofocus

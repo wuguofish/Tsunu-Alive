@@ -41,11 +41,28 @@ interface ToolUseItem {
   userResponse?: string;  // 使用者拒絕或自訂的回應
 }
 
+// 對話項目（文字或工具，按時間順序）
+type ChatItem =
+  | { type: 'text'; content: string }
+  | { type: 'tool'; tool: ToolUseItem };
+
+// 訊息類型（包含按時間順序的項目）
+interface Message {
+  role: 'user' | 'assistant';
+  items: ChatItem[];  // 按時間順序的項目（文字和工具穿插）
+}
+
 // 目前的 session ID
 const sessionId = ref<string | null>(null);
 
 // 目前使用的 model
 const currentModel = ref('');
+
+// Session 白名單（這個 session 內允許的工具）
+const sessionAllowedTools = ref<Set<string>>(new Set());
+
+// 記住上一次的 prompt（用於權限確認後重新執行）
+const lastPrompt = ref<string>('');
 
 // 累積的回應文字
 const streamingText = ref('');
@@ -53,7 +70,10 @@ const streamingText = ref('');
 // 目前的工具使用
 const currentToolUses = ref<ToolUseItem[]>([]);
 
-// 事件監聽取消函數
+// 這次請求中所有被拒絕的工具（用於 "yes-all" 時一次加入白名單）
+const deniedToolsThisRequest = ref<Set<string>>(new Set());
+
+// 事件監聯取消函數
 let unlistenClaude: UnlistenFn | null = null;
 
 // 自訂 renderer 來處理程式碼高亮
@@ -73,12 +93,6 @@ marked.use({ renderer });
 // 將 Markdown 轉換為 HTML
 function renderMarkdown(content: string): string {
   return marked.parse(content) as string;
-}
-
-// 訊息類型
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
 }
 
 // 阿宇的表情狀態
@@ -102,7 +116,7 @@ const currentAvatar = computed(() => avatarImages[avatarState.value]);
 const messages = ref<Message[]>([
   {
     role: 'assistant',
-    content: '欸，你來啦～有什麼需要幫忙的嗎？ *推眼鏡*'
+    items: [{ type: 'text', content: '欸，你來啦～有什麼需要幫忙的嗎？ *推眼鏡*' }]
   }
 ]);
 
@@ -112,8 +126,78 @@ const userInput = ref('');
 // 是否正在等待回應
 const isLoading = ref(false);
 
+// 阿宇風格忙碌狀態文字
+const uniThinkingTexts = [
+  // 經典動作
+  "推眼鏡中",
+  "敲鍵盤中",
+  "輕敲桌面",
+  "翻閱文件中",
+  "盯著螢幕",
+  "若有所思",
+  "撐著下巴",
+
+  // 工程師風格
+  "Debug 中",
+  "Compiling...",
+  "npm thinking",
+  "git thinking",
+  "重構思緒中",
+  "載入記憶體",
+  "優化路徑中",
+
+  // 阿宇口頭禪
+  "讓我想想",
+  "這個嘛...",
+  "嗯......",
+  "欸等等",
+  "從另一個角度想的話...",
+
+  // 生活化
+  "泡咖啡中",
+  "喝一口茶",
+  "整理思緒",
+  "翻找資料",
+
+  // 可愛一點的
+  "腦袋轉轉",
+  "認真思考",
+  "專注模式",
+  "沉思中",
+];
+
+// 忙碌狀態符號（包含狗狗元素 🐕）
+const thinkingSymbols = ['·', '◦', '○', '◉', '●', '🐾', '🐕', '🐶', '🦴', '🐩', '🐕‍🦺'];
+
 // 忙碌狀態文字
-const busyStatus = ref('Perusing...');
+const busyStatus = ref('');
+let busyTextInterval: ReturnType<typeof setInterval> | null = null;
+let symbolIndex = 0;
+
+// 隨機取得忙碌文字
+function getRandomThinkingText(): string {
+  const text = uniThinkingTexts[Math.floor(Math.random() * uniThinkingTexts.length)];
+  const symbol = thinkingSymbols[symbolIndex % thinkingSymbols.length];
+  symbolIndex++;
+  return `${text} ${symbol}`;
+}
+
+// 開始忙碌文字動畫
+function startBusyTextAnimation() {
+  busyStatus.value = getRandomThinkingText();
+  busyTextInterval = setInterval(() => {
+    busyStatus.value = getRandomThinkingText();
+  }, 2000); // 每 2 秒換一次
+}
+
+// 停止忙碌文字動畫
+function stopBusyTextAnimation() {
+  if (busyTextInterval) {
+    clearInterval(busyTextInterval);
+    busyTextInterval = null;
+  }
+  busyStatus.value = '';
+}
 
 // 編輯模式
 type EditMode = 'ask' | 'auto' | 'plan';
@@ -155,30 +239,78 @@ async function scrollToBottom() {
 }
 
 // 加入工具使用記錄（避免重複）
+// 取得或建立當前的 assistant 訊息
+function getOrCreateAssistantMessage(): Message {
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant') {
+    return lastMsg;
+  }
+  // 建立新的 assistant 訊息（items 陣列用於按時間順序存放文字和工具）
+  const newMsg: Message = {
+    role: 'assistant',
+    items: []
+  };
+  messages.value.push(newMsg);
+  return newMsg;
+}
+
 function addToolUse(toolName: string, toolId: string, input: Record<string, unknown>) {
-  // 用 tool_id 檢查是否已存在
-  const existingById = currentToolUses.value.find(t => t.id === toolId);
-  if (!existingById) {
-    // 額外檢查：如果是同類型工具且描述相同，也視為重複（stream 重複發送的情況）
-    const desc = (input?.description as string) || '';
-    const existingByContent = currentToolUses.value.find(t =>
-      t.type === toolName &&
-      (t.input?.description as string || '') === desc
-    );
-    if (!existingByContent) {
-      currentToolUses.value.push({
+  // 取得當前的 assistant 訊息
+  const assistantMsg = getOrCreateAssistantMessage();
+
+  // 用 tool_id 檢查是否已存在於 items 中
+  const existingById = assistantMsg.items.find(
+    (item): item is { type: 'tool'; tool: ToolUseItem } =>
+      item.type === 'tool' && item.tool.id === toolId
+  );
+  if (existingById) return; // 已存在，直接返回
+
+  // 額外檢查：如果是同類型工具且 input 完全相同，也視為重複（stream 重複發送的情況）
+  const inputJson = JSON.stringify(input);
+  const existingByInput = assistantMsg.items.find(
+    (item): item is { type: 'tool'; tool: ToolUseItem } =>
+      item.type === 'tool' &&
+      item.tool.type === toolName &&
+      JSON.stringify(item.tool.input) === inputJson
+  );
+
+  if (!existingByInput) {
+    // 在 items 中按時間順序添加工具項目
+    assistantMsg.items.push({
+      type: 'tool',
+      tool: {
         id: toolId,
         type: toolName,
         name: toolName,
         input: input
-      });
-    }
+      }
+    });
+  }
+
+  // 同時更新 currentToolUses（用於權限確認時的引用）
+  if (!currentToolUses.value.find(t => t.id === toolId)) {
+    currentToolUses.value.push({
+      id: toolId,
+      type: toolName,
+      name: toolName,
+      input: input
+    });
   }
 }
 
 // 處理 Claude 事件
 function handleClaudeEvent(event: ClaudeEvent) {
-  console.log('Claude event:', event);
+  console.log('Claude event:', event.event_type, event);
+
+  // Debug: 特別追蹤權限相關事件
+  if (event.event_type === 'PermissionDenied') {
+    console.log('🔴 PermissionDenied received:', {
+      tool_name: event.tool_name,
+      tool_id: event.tool_id,
+      editMode: editMode.value,
+      currentPendingPermission: pendingPermission.value
+    });
+  }
 
   switch (event.event_type) {
     case 'Init':
@@ -196,17 +328,17 @@ function handleClaudeEvent(event: ClaudeEvent) {
       // 收到文字串流
       if (event.text) {
         streamingText.value += event.text;
-        // 檢查是否需要加入新的助手訊息
-        const lastMsg = messages.value[messages.value.length - 1];
-        if (lastMsg && lastMsg.role === 'assistant') {
-          // 更新現有的助手訊息
-          lastMsg.content = streamingText.value;
+        // 取得或建立 assistant 訊息
+        const assistantMsg = getOrCreateAssistantMessage();
+
+        // 找到最後一個文字項目，或創建新的
+        const lastItem = assistantMsg.items[assistantMsg.items.length - 1];
+        if (lastItem && lastItem.type === 'text') {
+          // 更新現有的文字項目
+          lastItem.content = streamingText.value;
         } else {
-          // 第一次收到文字，加入新的助手訊息
-          messages.value.push({
-            role: 'assistant',
-            content: streamingText.value
-          });
+          // 在工具後面添加新的文字項目
+          assistantMsg.items.push({ type: 'text', content: streamingText.value });
         }
         scrollToBottom();
       }
@@ -222,13 +354,39 @@ function handleClaudeEvent(event: ClaudeEvent) {
 
     case 'PermissionDenied':
       // 權限被拒絕（由 Claude CLI 的 default 權限模式回報）
-      if (event.tool_name && event.tool_id) {
-        // 更新工具使用記錄為已取消
-        const tool = currentToolUses.value.find(t => t.id === event.tool_id);
-        if (tool) {
-          tool.isCancelled = true;
-          tool.userResponse = 'Permission denied by CLI';
+      // 在 'ask' 模式下顯示確認對話框
+      console.log('🔴 PermissionDenied conditions:', {
+        has_tool_name: !!event.tool_name,
+        has_tool_id: !!event.tool_id,
+        editMode: editMode.value,
+        will_show_dialog: !!(event.tool_name && event.tool_id && editMode.value === 'ask')
+      });
+
+      if (event.tool_name && event.tool_id && editMode.value === 'ask') {
+        // 先加入工具使用記錄（顯示為待確認狀態）
+        addToolUse(event.tool_name, event.tool_id, event.input || {});
+
+        // 累積這次請求中被拒絕的工具（用於 "yes-all" 時一次加入白名單）
+        deniedToolsThisRequest.value.add(event.tool_name);
+        console.log('🔴 Accumulated denied tools:', [...deniedToolsThisRequest.value]);
+
+        // 只有當還沒有待確認的對話框時才顯示（避免覆蓋）
+        if (!pendingPermission.value) {
+          pendingPermission.value = {
+            toolName: event.tool_name,
+            toolId: event.tool_id,
+            input: event.input || {}
+          };
+
+          console.log('🔴 Setting pendingPermission:', pendingPermission.value);
+
+          // 切換到等待狀態
+          avatarState.value = 'waiting';
+          stopBusyTextAnimation();
+          busyStatus.value = '等待確認...';
         }
+      } else {
+        console.log('🔴 PermissionDenied ignored due to conditions not met');
       }
       break;
 
@@ -240,12 +398,27 @@ function handleClaudeEvent(event: ClaudeEvent) {
     case 'ToolResult':
       // 工具結果
       if (event.tool_id) {
+        // 更新 currentToolUses
         const tool = currentToolUses.value.find(t => t.id === event.tool_id);
         if (tool) {
           tool.result = event.result;
-          // 如果是錯誤結果，標記為取消
           if (event.is_error) {
             tool.isCancelled = true;
+          }
+        }
+
+        // 同時更新 assistant 訊息中的工具（在 items 陣列中查找）
+        const lastMsg = messages.value[messages.value.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant') {
+          const toolItem = lastMsg.items.find(
+            (item): item is { type: 'tool'; tool: ToolUseItem } =>
+              item.type === 'tool' && item.tool.id === event.tool_id
+          );
+          if (toolItem) {
+            toolItem.tool.result = event.result;
+            if (event.is_error) {
+              toolItem.tool.isCancelled = true;
+            }
           }
         }
       }
@@ -254,9 +427,11 @@ function handleClaudeEvent(event: ClaudeEvent) {
     case 'Complete':
       // 完成
       isLoading.value = false;
+      stopBusyTextAnimation();
       avatarState.value = 'complete';
       streamingText.value = '';
-      currentToolUses.value = [];
+      // 注意：不清空 currentToolUses，讓工具結果保留在對話框內
+      // 會在下一次 sendMessageCore 開始時清空
 
       // 3 秒後回到待機表情
       setTimeout(() => {
@@ -267,11 +442,12 @@ function handleClaudeEvent(event: ClaudeEvent) {
     case 'Error':
       // 錯誤
       isLoading.value = false;
+      stopBusyTextAnimation();
       avatarState.value = 'idle';
       if (event.message) {
         messages.value.push({
           role: 'assistant',
-          content: `*皺眉* 抱歉，出了點問題：${event.message}`
+          items: [{ type: 'text', content: `*皺眉* 抱歉，出了點問題：${event.message}` }]
         });
       }
       break;
@@ -295,45 +471,73 @@ onUnmounted(() => {
   if (unlistenClaude) {
     unlistenClaude();
   }
+  stopBusyTextAnimation();
 });
 
-// 送出訊息
-async function sendMessage() {
-  const content = userInput.value.trim();
-  if (!content || isLoading.value) return;
-
-  // 加入使用者訊息
-  messages.value.push({
-    role: 'user',
-    content: content
-  });
-  userInput.value = '';
-  await scrollToBottom();
-
+// 送出訊息（核心函數，支援 allowedTools）
+async function sendMessageCore(content: string, extraAllowedTools: string[] = []) {
   // 開始載入狀態
   isLoading.value = true;
   avatarState.value = 'processing';
-  busyStatus.value = 'Connecting...';
+  startBusyTextAnimation();
   streamingText.value = '';
-  // 注意：不要在這裡加入空的助手訊息，等收到第一個文字時再加入
+  currentToolUses.value = [];  // 清空當前請求的工具追蹤（舊的已保存在 messages 中）
+  deniedToolsThisRequest.value.clear();  // 清空這次請求累積的被拒絕工具
+
+  // 合併 session 白名單和額外的工具
+  const allAllowedTools = [
+    ...sessionAllowedTools.value,
+    ...extraAllowedTools
+  ];
+
+  // 根據編輯模式決定 permissionMode
+  let permissionMode: string | null = null;
+  if (editMode.value === 'auto') {
+    permissionMode = 'bypassPermissions';
+  } else if (editMode.value === 'plan') {
+    permissionMode = 'plan';
+  }
+  // 'ask' 模式使用 default，不傳參數
 
   try {
     // 呼叫 Rust 端送出訊息給 Claude CLI
     await invoke('send_to_claude', {
       prompt: content,
-      workingDir: null  // 使用預設目錄
+      workingDir: null,  // 使用預設目錄
+      allowedTools: allAllowedTools.length > 0 ? allAllowedTools : null,
+      permissionMode: permissionMode
     });
   } catch (error) {
     console.error('Failed to send to Claude:', error);
     isLoading.value = false;
+    stopBusyTextAnimation();
     avatarState.value = 'idle';
 
     // 加入錯誤訊息
     messages.value.push({
       role: 'assistant',
-      content: `*皺眉* 連接 Claude 時發生錯誤：${error}`
+      items: [{ type: 'text', content: `*皺眉* 連接 Claude 時發生錯誤：${error}` }]
     });
   }
+}
+
+// 送出訊息（從輸入框）
+async function sendMessage() {
+  const content = userInput.value.trim();
+  if (!content || isLoading.value) return;
+
+  // 記住這次的 prompt（用於權限確認後重新執行）
+  lastPrompt.value = content;
+
+  // 加入使用者訊息
+  messages.value.push({
+    role: 'user',
+    items: [{ type: 'text', content: content }]
+  });
+  userInput.value = '';
+  await scrollToBottom();
+
+  await sendMessageCore(content);
 }
 
 // 按 Enter 送出（Shift+Enter 換行）
@@ -345,44 +549,122 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 // 處理權限確認回應
-// 注意：目前使用 -p 模式時無法進行互動式權限確認
-// 此功能保留供未來實作互動模式使用
-async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'no' | 'custom', customMessage?: string) {
-  console.log('Permission response:', response, customMessage);
+// 使用「後處理」模式：確認後用 --allowedTools 重新執行
+async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-always' | 'no' | 'custom', customMessage?: string) {
+  console.log('🟢 Permission response:', response, customMessage);
+  console.log('🟢 Current state:', {
+    pendingPermission: pendingPermission.value,
+    lastPrompt: lastPrompt.value,
+    sessionAllowedTools: [...sessionAllowedTools.value]
+  });
 
   if (!pendingPermission.value) return;
 
+  const toolName = pendingPermission.value.toolName;
   const toolId = pendingPermission.value.toolId;
-  let userResponse: string | undefined;
-
-  switch (response) {
-    case 'no':
-      userResponse = 'Denied by user';
-      break;
-    case 'custom':
-      userResponse = customMessage;
-      break;
-  }
-
-  // 如果是拒絕或自訂回應，更新工具使用記錄
-  if (response === 'no' || response === 'custom') {
-    const tool = currentToolUses.value.find(t => t.id === toolId);
-    if (tool) {
-      tool.isCancelled = true;
-      tool.userResponse = userResponse;
-    }
-  }
 
   // 清除待確認的權限
   pendingPermission.value = null;
 
-  // 恢復處理狀態
-  avatarState.value = 'processing';
-  busyStatus.value = 'Processing...';
+  switch (response) {
+    case 'yes':
+      // 單次允許：用 --allowedTools 重新執行同一個請求
+      if (lastPrompt.value) {
+        console.log(`Re-executing with allowedTools: ${toolName}`);
+        await sendMessageCore(lastPrompt.value, [toolName]);
+      }
+      break;
 
-  // TODO: 當實作互動模式時，這裡需要發送回應給 Claude CLI
-  // 目前 -p 模式下權限確認由 CLI 自動處理
-  console.log('Interactive permission response not yet implemented');
+    case 'yes-all':
+      // 本次 session 都允許：將所有這次被拒絕的工具都加入白名單後重新執行
+      // 這樣可以一次處理多個被拒絕的工具，避免反覆確認
+      for (const deniedTool of deniedToolsThisRequest.value) {
+        sessionAllowedTools.value.add(deniedTool);
+      }
+      console.log(`Added all denied tools to session whitelist:`, [...sessionAllowedTools.value]);
+      if (lastPrompt.value) {
+        await sendMessageCore(lastPrompt.value);
+      }
+      break;
+
+    case 'yes-always':
+      // 專案內永久允許：將所有這次被拒絕的工具寫入專案設定
+      // 同時也加入 session 白名單
+      for (const deniedTool of deniedToolsThisRequest.value) {
+        sessionAllowedTools.value.add(deniedTool);
+        // 寫入專案設定
+        try {
+          await invoke('add_project_permission', {
+            workingDir: 'D:\\game\\tsunu_alive',  // TODO: 改成動態取得工作目錄
+            toolName: deniedTool
+          });
+          console.log(`Added project permission: ${deniedTool}`);
+        } catch (error) {
+          console.error(`Failed to add project permission for ${deniedTool}:`, error);
+        }
+      }
+      if (lastPrompt.value) {
+        await sendMessageCore(lastPrompt.value);
+      }
+      break;
+
+    case 'no':
+      // 拒絕：更新工具使用記錄，不重新執行
+      {
+        // 更新 currentToolUses
+        const tool = currentToolUses.value.find(t => t.id === toolId);
+        if (tool) {
+          tool.isCancelled = true;
+          tool.userResponse = 'Denied by user';
+        }
+        // 同時更新 assistant 訊息中的工具（在 items 陣列中查找）
+        const lastMsg = messages.value[messages.value.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant') {
+          const toolItem = lastMsg.items.find(
+            (item): item is { type: 'tool'; tool: ToolUseItem } =>
+              item.type === 'tool' && item.tool.id === toolId
+          );
+          if (toolItem) {
+            toolItem.tool.isCancelled = true;
+            toolItem.tool.userResponse = 'Denied by user';
+          }
+        }
+      }
+      avatarState.value = 'idle';
+      break;
+
+    case 'custom':
+      // 自訂回應：發送使用者的訊息作為新的請求
+      if (customMessage) {
+        // 更新 currentToolUses
+        const tool = currentToolUses.value.find(t => t.id === toolId);
+        if (tool) {
+          tool.isCancelled = true;
+          tool.userResponse = customMessage;
+        }
+        // 同時更新 assistant 訊息中的工具（在 items 陣列中查找）
+        const lastMsg = messages.value[messages.value.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant') {
+          const toolItem = lastMsg.items.find(
+            (item): item is { type: 'tool'; tool: ToolUseItem } =>
+              item.type === 'tool' && item.tool.id === toolId
+          );
+          if (toolItem) {
+            toolItem.tool.isCancelled = true;
+            toolItem.tool.userResponse = customMessage;
+          }
+        }
+        // 將自訂訊息作為新的使用者訊息發送
+        messages.value.push({
+          role: 'user',
+          items: [{ type: 'text', content: customMessage }]
+        });
+        await scrollToBottom();
+        lastPrompt.value = customMessage;
+        await sendMessageCore(customMessage);
+      }
+      break;
+  }
 }
 
 // 中斷請求
@@ -400,6 +682,7 @@ async function interruptRequest() {
   }
 
   isLoading.value = false;
+  stopBusyTextAnimation();
   avatarState.value = 'idle';
   streamingText.value = '';
   currentToolUses.value = [];
@@ -421,29 +704,34 @@ async function interruptRequest() {
         <!-- 對話訊息 -->
         <div class="chat-container" ref="chatContainer">
           <div
-            v-for="(msg, index) in messages"
-            :key="index"
+            v-for="(msg, msgIndex) in messages"
+            :key="msgIndex"
             :class="['message', msg.role]"
           >
-            <div
-              class="message-content markdown-body"
-              v-html="renderMarkdown(msg.content)"
-            ></div>
-          </div>
+            <!-- 按時間順序渲染 items（文字和工具交錯顯示）-->
+            <template v-for="(item, itemIndex) in msg.items" :key="itemIndex">
+              <!-- 工具項目 -->
+              <div v-if="item.type === 'tool'" class="tool-item">
+                <ToolIndicator
+                  :type="item.tool.type as any"
+                  :path="(item.tool.input?.file_path as string) || (item.tool.input?.path as string)"
+                  :description="item.tool.input?.description as string"
+                  :input="item.tool.input?.command as string"
+                  :output="item.tool.result"
+                  :isRunning="!item.tool.result && !item.tool.isCancelled"
+                  :isCancelled="item.tool.isCancelled"
+                  :userResponse="item.tool.userResponse"
+                />
+              </div>
 
-          <!-- 工具使用提示會在這裡動態顯示 -->
-          <template v-for="tool in currentToolUses" :key="tool.id">
-            <ToolIndicator
-              :type="tool.type as any"
-              :path="(tool.input?.file_path as string) || (tool.input?.path as string)"
-              :description="tool.input?.description as string"
-              :input="tool.input?.command as string"
-              :output="tool.result"
-              :isRunning="!tool.result && !tool.isCancelled"
-              :isCancelled="tool.isCancelled"
-              :userResponse="tool.userResponse"
-            />
-          </template>
+              <!-- 文字項目 -->
+              <div
+                v-else-if="item.type === 'text' && item.content"
+                class="message-content markdown-body"
+                v-html="renderMarkdown(item.content)"
+              ></div>
+            </template>
+          </div>
 
           <!-- 權限確認對話框 -->
           <PermissionDialog
@@ -751,6 +1039,7 @@ body {
 
 .message {
   display: flex;
+  flex-direction: column;  /* 垂直排列：工具在上，訊息在下 */
   max-width: 85%;
 }
 
@@ -760,6 +1049,13 @@ body {
 
 .message.assistant {
   align-self: flex-end;
+  max-width: 85%;  /* 讓 assistant 訊息可以更寬以容納工具 */
+}
+
+/* 工具項目 - 與文字交錯顯示 */
+.tool-item {
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 .message-content {
