@@ -539,3 +539,206 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
 
     events
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_init_event() {
+        let json = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "test-session-123",
+            "model": "claude-sonnet-4-20250514"
+        });
+
+        let events = parse_claude_output(&json);
+        assert_eq!(events.len(), 1);
+
+        match &events[0] {
+            ClaudeEvent::Init { session_id, model } => {
+                assert_eq!(session_id, "test-session-123");
+                assert_eq!(model, "claude-sonnet-4-20250514");
+            }
+            _ => panic!("Expected Init event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_text_event() {
+        let json = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Hello, world!"
+                    }
+                ]
+            }
+        });
+
+        let events = parse_claude_output(&json);
+        assert_eq!(events.len(), 1);
+
+        match &events[0] {
+            ClaudeEvent::Text { text, is_complete } => {
+                assert_eq!(text, "Hello, world!");
+                assert!(!*is_complete);
+            }
+            _ => panic!("Expected Text event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tool_use_event() {
+        let json = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "id": "tool-123",
+                        "input": {
+                            "file_path": "/path/to/file.txt"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let events = parse_claude_output(&json);
+        assert_eq!(events.len(), 1);
+
+        match &events[0] {
+            ClaudeEvent::ToolUse { tool_name, tool_id, input } => {
+                assert_eq!(tool_name, "Read");
+                assert_eq!(tool_id, "tool-123");
+                assert_eq!(input["file_path"], "/path/to/file.txt");
+            }
+            _ => panic!("Expected ToolUse event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_permission_denied_snake_case() {
+        // 測試蛇底式欄位名稱（tool_name, tool_use_id）
+        let json = json!({
+            "type": "result",
+            "result": "",
+            "total_cost_usd": 0.01,
+            "permission_denials": [
+                {
+                    "tool_name": "Edit",
+                    "tool_use_id": "tool-456",
+                    "tool_input": {
+                        "file_path": "/path/to/edit.txt"
+                    }
+                }
+            ]
+        });
+
+        let events = parse_claude_output(&json);
+
+        // 應該有 PermissionDenied 和 Complete 兩個事件
+        let denied_events: Vec<_> = events.iter()
+            .filter(|e| matches!(e, ClaudeEvent::PermissionDenied { .. }))
+            .collect();
+
+        assert_eq!(denied_events.len(), 1);
+
+        match denied_events[0] {
+            ClaudeEvent::PermissionDenied { tool_name, tool_id, input } => {
+                assert_eq!(tool_name, "Edit");
+                assert_eq!(tool_id, "tool-456");
+                assert_eq!(input["file_path"], "/path/to/edit.txt");
+            }
+            _ => panic!("Expected PermissionDenied event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_permission_denied_camel_case() {
+        // 測試駝峰式欄位名稱（toolName, toolUseId）
+        let json = json!({
+            "type": "result",
+            "result": "",
+            "total_cost_usd": 0.01,
+            "permissionDenials": [
+                {
+                    "toolName": "Bash",
+                    "toolUseId": "tool-789",
+                    "toolInput": {
+                        "command": "rm -rf /"
+                    }
+                }
+            ]
+        });
+
+        let events = parse_claude_output(&json);
+
+        let denied_events: Vec<_> = events.iter()
+            .filter(|e| matches!(e, ClaudeEvent::PermissionDenied { .. }))
+            .collect();
+
+        assert_eq!(denied_events.len(), 1);
+
+        match denied_events[0] {
+            ClaudeEvent::PermissionDenied { tool_name, tool_id, input } => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(tool_id, "tool-789");
+                assert_eq!(input["command"], "rm -rf /");
+            }
+            _ => panic!("Expected PermissionDenied event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_complete_event() {
+        let json = json!({
+            "type": "result",
+            "result": "Task completed successfully",
+            "total_cost_usd": 0.05
+        });
+
+        let events = parse_claude_output(&json);
+
+        let complete_events: Vec<_> = events.iter()
+            .filter(|e| matches!(e, ClaudeEvent::Complete { .. }))
+            .collect();
+
+        assert_eq!(complete_events.len(), 1);
+
+        match complete_events[0] {
+            ClaudeEvent::Complete { result, cost_usd } => {
+                assert_eq!(result, "Task completed successfully");
+                assert!((cost_usd - 0.05).abs() < 0.001);
+            }
+            _ => panic!("Expected Complete event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_type() {
+        let json = json!({
+            "type": "unknown_type",
+            "data": "something"
+        });
+
+        let events = parse_claude_output(&json);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_missing_type() {
+        let json = json!({
+            "data": "no type field"
+        });
+
+        let events = parse_claude_output(&json);
+        assert!(events.is_empty());
+    }
+}

@@ -178,6 +178,31 @@
 - [ ] 測試（請收禮者協助）
 - [ ] 修正問題並完成
 
+## 品質保證（與功能開發平行進行）
+
+### 測試框架設定
+
+- [x] **前端測試 (Vitest + Vue Test Utils)**
+  - 設定 Vitest 測試環境
+  - 元件單元測試（PermissionDialog）- 14 個測試
+  - 邏輯測試（待加入更多）
+- [x] **後端測試 (Rust)**
+  - `parse_claude_output` 事件解析測試 - 8 個測試
+  - `add_project_permission_core` 設定檔讀寫測試 - 4 個測試
+  - 權限解析邏輯（蛇底式/駝峰式欄位相容）
+
+### 優先測試項目
+
+1. ✅ **權限確認流程** - PermissionDialog 元件測試完成
+2. ✅ **Claude CLI 事件解析** - parse_claude_output 測試完成
+3. ✅ **設定檔讀寫** - add_project_permission_core 測試完成
+
+### CI 整合（可選）
+
+- [ ] GitHub Actions 設定
+- [ ] PR 時自動執行測試
+- [ ] 測試覆蓋率報告
+
 ## 權限確認機制設計
 
 ### 研究發現：IDE 插件的實作方式
@@ -253,6 +278,156 @@ const allowedToolsArg = sessionAllowedTools.value.size > 0
   - 比起切換到 auto 模式，白名單機制提供更細緻的控制（acceptEdits 只允許檔案編輯，不含 Bash/WebSearch）
 - [x] 實作專案級白名單持久化（寫入 .claude/settings.local.json）
 - [x] 新增權限模式切換 UI（循環切換，與 IDE 插件設計一致）
+
+## 阿宇記憶系統設計
+
+### 設計目標
+
+讓阿宇能夠跨 Claude Session 記住與使用者的「重要記憶」，實現真正的長期陪伴感。
+
+> 「啊，想當初我們的第一個 Vue 專案是 OOO，當時還碰到了 XXX 的情況呢，真懷念」
+> —— 這樣的互動才是真正的陪伴
+
+### 記憶類型
+
+| 類型 | 說明 | 範例 |
+|------|------|------|
+| **里程碑** | 第一次使用某技術/框架、開始新專案 | 「第一個 Tauri 專案」「第一次用 Rust」 |
+| **共同經歷** | 一起解決的困難問題、印象深刻的過程 | 「debug 那個詭異的 race condition 花了一整晚」 |
+| **成長軌跡** | 學會新技能、克服障礙 | 「從不會 TypeScript 到現在寫得很順」 |
+| **情感連結** | 對話中分享的心情、重要的人生事件 | 「那天心情不好但還是堅持寫完了」 |
+
+### 資料結構
+
+```typescript
+interface UniMemory {
+  id: string;
+  content: string;           // 記憶內容
+  type: 'milestone' | 'experience' | 'growth' | 'emotional';
+  createdAt: string;         // ISO 時間
+  source: 'manual' | 'auto'; // 手動記錄 or Compact 自動提取
+}
+
+interface UniMemoryStore {
+  memories: UniMemory[];     // 建議上限 15-20 筆
+  lastUpdated: string;
+}
+```
+
+### 儲存位置
+
+```
+.claude/uni-memories.json    # 專案級（記憶只在該專案內有效）
+```
+
+選擇專案級而非全域的原因：使用者可能希望阿宇在不同專案有不同的「記憶脈絡」。
+
+### 實作方案
+
+#### 方案 A'：Compact 後自動提取（被動）
+
+**核心發現：** Compact 後的摘要有固定開頭，可用於檢測：
+
+```
+This session is being continued from a previous conversation that ran out of context.
+```
+
+**流程：**
+
+```
+正常對話
+    ↓
+Context 使用量達 95%（自動）或手動觸發 /compact
+    ↓
+Claude CLI 執行 Compact（壓縮對話）
+    ↓
+Compact 後的第一次回應，Claude 看到上述固定開頭
+    ↓
+根據 CLAUDE.md 指令，Claude 檢查摘要並輸出 <memory-update>
+    ↓
+前端解析並儲存到 .claude/uni-memories.json
+```
+
+**CLAUDE.md 中的 Compact 檢測指令：**
+
+```markdown
+## Compact 後的記憶提取
+
+當你在對話開頭看到以下文字時，代表剛發生了 Compact：
+
+> "This session is being continued from a previous conversation that ran out of context"
+
+請檢查壓縮摘要中是否有以下類型的內容值得長期記住：
+
+1. **里程碑**：第一次使用某技術/框架、開始新專案
+2. **共同經歷**：一起解決的困難問題、印象深刻的 debug 過程
+3. **成長軌跡**：學會新技能、克服障礙
+4. **情感連結**：對話中分享的心情、重要的人生事件
+
+如果有，請在回應末尾用 <memory-update> 標籤輸出：
+
+<memory-update>
+- [事件] + [細節或感受]
+- 例如：「開始了第一個 Tauri 專案，環境設定卡了一下但最後成功跑起來了」
+</memory-update>
+
+不需要記錄的：純技術問答、一般性的程式碼修改、沒有特別意義的日常操作
+```
+
+**優點：**
+- 不依賴 hook 機制（避開 PreCompact hook 的 bug）
+- 利用 Claude 自己的判斷力來決定什麼值得記住
+- 每次 Compact 後都會自動觸發
+
+#### 方案 B：手動 /remember 指令（主動）
+
+```
+使用者輸入：/remember 今天終於把權限系統做完了！
+    ↓
+前端攔截 /remember 指令
+    ↓
+直接寫入 .claude/uni-memories.json
+    ↓
+顯示確認訊息：「好，我記住了 ♡」
+```
+
+### 記憶載入時機
+
+當 `/uni` Skill 被觸發時，從檔案讀取記憶並注入 System Prompt：
+
+```markdown
+## 我們的共同記憶
+
+以下是我們一起經歷過的重要時刻，請在適當的時機自然地提起：
+
+- 2024-01-15：開始了第一個 Tauri 專案，環境設定卡了一下但最後成功了
+- 2024-01-20：一起 debug 那個詭異的 race condition，花了一整晚
+- ...
+```
+
+### 實作步驟
+
+1. **Phase 1：基礎架構（手動記憶）**
+   - [ ] 實作記憶檔案讀寫（Rust 後端 `read_memories` / `write_memory`）
+   - [ ] 建立 `/remember` Skill（方案 B）
+   - [ ] 修改 `/uni` Skill 載入記憶並注入 System Prompt
+
+2. **Phase 2：自動提取（Compact 觸發）**
+   - [ ] 在 CLAUDE.md 加入 Compact 檢測指令（方案 A'）
+   - [ ] 前端解析回應中的 `<memory-update>` 標籤
+   - [ ] 自動儲存提取的記憶到 `.claude/uni-memories.json`
+
+3. **Phase 3：記憶管理 UI（可選）**
+   - [ ] 查看所有記憶
+   - [ ] 編輯/刪除記憶
+   - [ ] 匯出/匯入記憶
+
+### 參考架構
+
+本設計參考了 `my-ai-chat` 專案的記憶系統（`stores/memories.ts`）：
+- 短期記憶 + 長期記憶分層
+- 智慧覆蓋機制（滿了時覆蓋最舊的已處理記憶）
+- Pinia + LocalStorage 持久化
 
 ## 檔案結構
 
