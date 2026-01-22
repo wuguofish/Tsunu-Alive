@@ -182,20 +182,30 @@
 
 ### 測試框架設定
 
-- [x] **前端測試 (Vitest + Vue Test Utils)**
+- [x] **前端測試 (Vitest + Vue Test Utils)** - 61 tests
   - 設定 Vitest 測試環境
-  - 元件單元測試（PermissionDialog）- 14 個測試
-  - 邏輯測試（待加入更多）
-- [x] **後端測試 (Rust)**
-  - `parse_claude_output` 事件解析測試 - 8 個測試
-  - `add_project_permission_core` 設定檔讀寫測試 - 4 個測試
+  - PermissionDialog 元件測試 - 14 tests
+  - ToolIndicator 元件測試 - 19 tests
+  - claudeEventHandler 邏輯測試 - 26 tests
+  - sanity 測試 - 2 tests
+- [x] **後端測試 (Rust)** - 12 tests
+  - `parse_claude_output` 事件解析測試 - 8 tests
+  - `add_project_permission_core` 設定檔讀寫測試 - 4 tests
   - 權限解析邏輯（蛇底式/駝峰式欄位相容）
 
 ### 優先測試項目
 
-1. ✅ **權限確認流程** - PermissionDialog 元件測試完成
-2. ✅ **Claude CLI 事件解析** - parse_claude_output 測試完成
+1. ✅ **權限確認流程** - PermissionDialog + claudeEventHandler 測試完成
+2. ✅ **Claude CLI 事件解析** - parse_claude_output + claudeEventHandler 測試完成
 3. ✅ **設定檔讀寫** - add_project_permission_core 測試完成
+
+### 測試統計
+
+| 類別 | 測試數量 |
+| ------ | ---------- |
+| 前端 (Vitest) | 61 |
+| 後端 (Rust) | 12 |
+| **總計** | **73** |
 
 ### CI 整合（可選）
 
