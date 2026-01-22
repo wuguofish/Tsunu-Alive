@@ -11,6 +11,7 @@ import {
   handleClaudeEvent,
   type AppState,
   type ClaudeEvent,
+  type ContextInfo,
 } from '../../src/utils/claudeEventHandler'
 
 // 建立預設的測試狀態
@@ -27,6 +28,8 @@ function createDefaultState(): AppState {
     busyStatus: '',
     isLoading: false,
     editMode: 'ask',
+    contextUsage: null,
+    contextInfo: null,
   }
 }
 
@@ -420,6 +423,47 @@ describe('claudeEventHandler', () => {
 
       expect(result.actions).toContainEqual({ type: 'stopBusyTextAnimation' })
       expect(result.actions).toContainEqual({ type: 'startCompleteTimer' })
+    })
+
+    it('updates context usage when provided', () => {
+      const state = createDefaultState()
+      const event: ClaudeEvent = {
+        event_type: 'Complete',
+        context_window_used_percent: 45.7,
+      }
+
+      const result = handleCompleteEvent(event, state)
+
+      expect(result.stateUpdates.contextUsage).toBe(46) // 四捨五入
+    })
+
+    it('updates context info when provided', () => {
+      const state = createDefaultState()
+      const event: ClaudeEvent = {
+        event_type: 'Complete',
+        total_tokens_in_conversation: 15000,
+        context_window_max: 200000,
+      }
+
+      const result = handleCompleteEvent(event, state)
+
+      expect(result.stateUpdates.contextInfo).toEqual({
+        totalTokens: 15000,
+        maxTokens: 200000,
+      })
+    })
+
+    it('does not set context fields when not provided', () => {
+      const state = createDefaultState()
+      const event: ClaudeEvent = {
+        event_type: 'Complete',
+        cost_usd: 0.01,
+      }
+
+      const result = handleCompleteEvent(event, state)
+
+      expect(result.stateUpdates.contextUsage).toBeUndefined()
+      expect(result.stateUpdates.contextInfo).toBeUndefined()
     })
   })
 

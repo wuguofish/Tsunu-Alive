@@ -16,6 +16,10 @@ export interface ClaudeEvent {
   is_error?: boolean;
   cost_usd?: number;
   message?: string;
+  // Context 相關資訊（Complete 事件）
+  total_tokens_in_conversation?: number;
+  context_window_max?: number;
+  context_window_used_percent?: number;
 }
 
 // 待確認的權限請求
@@ -53,6 +57,12 @@ export type AvatarState = 'idle' | 'processing' | 'complete' | 'waiting';
 // 編輯模式
 export type EditMode = 'ask' | 'auto' | 'reject';
 
+// Context 詳細資訊
+export interface ContextInfo {
+  totalTokens?: number;
+  maxTokens?: number;
+}
+
 // 應用狀態（用於事件處理）
 export interface AppState {
   sessionId: string | null;
@@ -66,6 +76,9 @@ export interface AppState {
   busyStatus: string;
   isLoading: boolean;
   editMode: EditMode;
+  // Context 相關
+  contextUsage: number | null;
+  contextInfo: ContextInfo | null;
 }
 
 // 事件處理結果
@@ -312,15 +325,28 @@ export function handleToolResultEvent(
  * 處理 Complete 事件
  */
 export function handleCompleteEvent(
-  _event: ClaudeEvent,
+  event: ClaudeEvent,
   _state: AppState
 ): EventHandlerResult {
+  const stateUpdates: Partial<AppState> = {
+    isLoading: false,
+    avatarState: 'complete',
+    streamingText: '',
+  };
+
+  // 更新 context 使用量資訊
+  if (event.context_window_used_percent !== undefined) {
+    stateUpdates.contextUsage = Math.round(event.context_window_used_percent);
+  }
+  if (event.total_tokens_in_conversation !== undefined || event.context_window_max !== undefined) {
+    stateUpdates.contextInfo = {
+      totalTokens: event.total_tokens_in_conversation,
+      maxTokens: event.context_window_max,
+    };
+  }
+
   return {
-    stateUpdates: {
-      isLoading: false,
-      avatarState: 'complete',
-      streamingText: '',
-    },
+    stateUpdates,
     actions: [
       { type: 'stopBusyTextAnimation' },
       { type: 'startCompleteTimer' },

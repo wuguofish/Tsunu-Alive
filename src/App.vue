@@ -21,6 +21,10 @@ interface ClaudeEvent {
   is_error?: boolean;
   cost_usd?: number;
   message?: string;
+  // Context 相關資訊（Complete 事件）
+  total_tokens_in_conversation?: number;
+  context_window_max?: number;
+  context_window_used_percent?: number;
 }
 
 // 待確認的權限請求
@@ -218,8 +222,14 @@ function cycleEditMode() {
 // 目前檔案（測試用）
 const currentFile = ref('App.vue');
 
-// Context 用量（測試用，0-100）
-const contextUsage = ref(87);
+// Context 用量（0-100，null 表示尚未取得）
+const contextUsage = ref<number | null>(null);
+
+// Context 詳細資訊
+const contextInfo = ref<{
+  totalTokens?: number;
+  maxTokens?: number;
+} | null>(null);
 
 // 斜線選單顯示狀態
 const showSlashMenu = ref(false);
@@ -433,6 +443,19 @@ function handleClaudeEvent(event: ClaudeEvent) {
       // 注意：不清空 currentToolUses，讓工具結果保留在對話框內
       // 會在下一次 sendMessageCore 開始時清空
 
+      // 更新 context 使用量資訊
+      if (event.context_window_used_percent !== undefined) {
+        contextUsage.value = Math.round(event.context_window_used_percent);
+        console.log('📊 Context usage updated:', contextUsage.value + '%');
+      }
+      if (event.total_tokens_in_conversation !== undefined || event.context_window_max !== undefined) {
+        contextInfo.value = {
+          totalTokens: event.total_tokens_in_conversation,
+          maxTokens: event.context_window_max,
+        };
+        console.log('📊 Context info:', contextInfo.value);
+      }
+
       // 3 秒後回到待機表情
       setTimeout(() => {
         avatarState.value = 'idle';
@@ -546,6 +569,37 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     sendMessage();
   }
+}
+
+// 執行斜線命令
+async function executeSlashCommand(command: string) {
+  showSlashMenu.value = false;
+
+  // 將斜線命令作為訊息發送
+  messages.value.push({
+    role: 'user',
+    items: [{ type: 'text', content: command }]
+  });
+  await scrollToBottom();
+
+  // 特殊處理某些命令
+  if (command === '/clear') {
+    // 清除對話（開始新 session）
+    messages.value = [
+      {
+        role: 'assistant',
+        items: [{ type: 'text', content: '好，我們開始新的對話吧！有什麼需要幫忙的嗎？ *推眼鏡*' }]
+      }
+    ];
+    sessionId.value = null;
+    contextUsage.value = null;
+    contextInfo.value = null;
+    return;
+  }
+
+  // 其他命令直接發送給 Claude CLI
+  lastPrompt.value = command;
+  await sendMessageCore(command);
 }
 
 // 處理權限確認回應
@@ -796,9 +850,13 @@ async function interruptRequest() {
             <span class="file-icon">&lt;/&gt;</span>
             <span class="file-name">{{ currentFile }}</span>
           </button>
-          <button class="status-btn context-usage" :title="`Context: ${contextUsage}% used`">
+          <button
+            class="status-btn context-usage"
+            :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
+            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}` : 'Context usage'"
+          >
             <span class="usage-icon">◐</span>
-            <span class="usage-text">{{ contextUsage }}% used</span>
+            <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
           </button>
         </div>
 
@@ -835,20 +893,32 @@ async function interruptRequest() {
         <input type="text" class="slash-search" placeholder="Filter actions..." />
         <div class="slash-section">
           <div class="slash-section-title">Model</div>
-          <div class="slash-item">Switch model... <span class="slash-hint">claude-opus-4-5-20251101</span></div>
-          <div class="slash-item">Thinking <span class="slash-toggle">○</span></div>
-          <div class="slash-item">Account & usage...</div>
+          <div class="slash-item" @click="executeSlashCommand('/model')">
+            Switch model... <span class="slash-hint">{{ currentModel || 'default' }}</span>
+          </div>
         </div>
         <div class="slash-section">
           <div class="slash-section-title">Slash Commands</div>
-          <div class="slash-item">/compact</div>
-          <div class="slash-item">/context</div>
-          <div class="slash-item">/cost</div>
+          <div class="slash-item" @click="executeSlashCommand('/compact')">
+            /compact <span class="slash-hint">壓縮對話歷史</span>
+          </div>
+          <div class="slash-item" @click="executeSlashCommand('/cost')">
+            /cost <span class="slash-hint">查看使用費用</span>
+          </div>
+          <div class="slash-item" @click="executeSlashCommand('/clear')">
+            /clear <span class="slash-hint">開始新對話</span>
+          </div>
         </div>
         <div class="slash-section">
-          <div class="slash-section-title">Settings</div>
-          <div class="slash-item">Switch account</div>
-          <div class="slash-item">General config...</div>
+          <div class="slash-section-title">Context</div>
+          <div class="slash-item context-info">
+            <span>使用量</span>
+            <span class="slash-hint">{{ contextUsage !== null ? contextUsage + '%' : '—' }}</span>
+          </div>
+          <div v-if="contextInfo" class="slash-item context-info">
+            <span>Tokens</span>
+            <span class="slash-hint">{{ contextInfo.totalTokens?.toLocaleString() || '?' }} / {{ contextInfo.maxTokens?.toLocaleString() || '?' }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1224,6 +1294,34 @@ textarea:disabled {
   font-size: 0.75rem;
 }
 
+/* Context usage 警告樣式 */
+.context-usage.warning {
+  color: #f39c12;
+}
+
+.context-usage.warning .usage-icon {
+  animation: pulse-warning 1.5s infinite;
+}
+
+.context-usage.danger {
+  color: #e74c3c;
+  font-weight: 600;
+}
+
+.context-usage.danger .usage-icon {
+  animation: pulse-danger 0.8s infinite;
+}
+
+@keyframes pulse-warning {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+@keyframes pulse-danger {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
 .slash-icon {
   font-size: 1rem;
   font-weight: 600;
@@ -1309,8 +1407,13 @@ textarea:disabled {
   transition: background-color 0.2s;
 }
 
-.slash-item:hover {
+.slash-item:hover:not(.context-info) {
   background-color: var(--primary-color);
+}
+
+.slash-item.context-info {
+  cursor: default;
+  opacity: 0.8;
 }
 
 .slash-hint {

@@ -42,6 +42,13 @@ pub enum ClaudeEvent {
     Complete {
         result: String,
         cost_usd: f64,
+        // Context 相關資訊
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_tokens_in_conversation: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_window_max: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_window_used_percent: Option<f64>,
     },
     // 錯誤
     Error {
@@ -492,10 +499,30 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 .and_then(|c| c.as_f64())
                 .unwrap_or(0.0);
 
+            // 解析 context window 相關欄位（支援蛇底式和駝峰式）
+            let total_tokens_in_conversation = json.get("total_tokens_in_conversation")
+                .or_else(|| json.get("totalTokensInConversation"))
+                .and_then(|v| v.as_u64());
+
+            let context_window_max = json.get("context_window_max")
+                .or_else(|| json.get("contextWindowMax"))
+                .or_else(|| json.get("max_context_tokens"))
+                .or_else(|| json.get("maxContextTokens"))
+                .and_then(|v| v.as_u64());
+
+            let context_window_used_percent = json.get("context_window_used_percent")
+                .or_else(|| json.get("contextWindowUsedPercent"))
+                .and_then(|v| v.as_f64());
+
             // Debug: 印出完整的 result JSON 來檢查結構
             eprintln!("🔍 Result JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
             // 額外印出完整 JSON 以便 debug
             eprintln!("🔍 Full result JSON: {}", serde_json::to_string_pretty(json).unwrap_or_default());
+            // 印出解析到的 context 資訊
+            if total_tokens_in_conversation.is_some() || context_window_max.is_some() || context_window_used_percent.is_some() {
+                eprintln!("📊 Context info: tokens={:?}, max={:?}, percent={:?}",
+                    total_tokens_in_conversation, context_window_max, context_window_used_percent);
+            }
 
             // 檢查是否有權限被拒絕（支援蛇底式和駝峰式）
             let denials = json.get("permission_denials")
@@ -532,7 +559,13 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 eprintln!("🔍 No permission_denials found in result");
             }
 
-            events.push(ClaudeEvent::Complete { result, cost_usd });
+            events.push(ClaudeEvent::Complete {
+                result,
+                cost_usd,
+                total_tokens_in_conversation,
+                context_window_max,
+                context_window_used_percent,
+            });
         }
         _ => {}
     }
@@ -713,9 +746,43 @@ mod tests {
         assert_eq!(complete_events.len(), 1);
 
         match complete_events[0] {
-            ClaudeEvent::Complete { result, cost_usd } => {
+            ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent } => {
                 assert_eq!(result, "Task completed successfully");
                 assert!((cost_usd - 0.05).abs() < 0.001);
+                assert!(total_tokens_in_conversation.is_none());
+                assert!(context_window_max.is_none());
+                assert!(context_window_used_percent.is_none());
+            }
+            _ => panic!("Expected Complete event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_complete_event_with_context_info() {
+        let json = json!({
+            "type": "result",
+            "result": "Done",
+            "total_cost_usd": 0.10,
+            "total_tokens_in_conversation": 15000,
+            "context_window_max": 200000,
+            "context_window_used_percent": 7.5
+        });
+
+        let events = parse_claude_output(&json);
+
+        let complete_events: Vec<_> = events.iter()
+            .filter(|e| matches!(e, ClaudeEvent::Complete { .. }))
+            .collect();
+
+        assert_eq!(complete_events.len(), 1);
+
+        match complete_events[0] {
+            ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent } => {
+                assert_eq!(result, "Done");
+                assert!((cost_usd - 0.10).abs() < 0.001);
+                assert_eq!(*total_tokens_in_conversation, Some(15000));
+                assert_eq!(*context_window_max, Some(200000));
+                assert!((context_window_used_percent.unwrap() - 7.5).abs() < 0.001);
             }
             _ => panic!("Expected Complete event"),
         }
