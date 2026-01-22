@@ -35,7 +35,15 @@
       "Bash(claude -p --output-format stream-json)",
       "Bash(claude:*)",
       "Bash(cargo check:*)",
-      "Bash(npm info:*)"
+      "Bash(npm info:*)",
+      "Bash(where:*)",
+      "Bash(cmd.exe /c \"rustc --version\")",
+      "Bash(cmd.exe /c \"npm --version\")",
+      "Bash(cmd.exe /c \"claude --version\")",
+      "Bash(\"C:/Users/USER/.cargo/bin/rustc.exe\" --version)",
+      "Bash(\"C:/Users/USER/.cargo/bin/cargo.exe\" --version)",
+      "Bash(echo:*)",
+      "Bash(npx tauri dev)"
     ]
   }
 }

@@ -94,6 +94,53 @@ impl UserMessage {
     }
 }
 
+/// 取得 Claude CLI 執行檔路徑
+/// 依序嘗試多個可能的安裝位置
+fn get_claude_path() -> String {
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    if let Some(home) = std::env::var_os(home_var) {
+        let home_path = std::path::Path::new(&home);
+
+        if cfg!(windows) {
+            // Windows: 依序嘗試
+            let candidates = [
+                // 1. 新版原生 exe（推薦）
+                home_path.join(".local").join("bin").join("claude.exe"),
+                // 2. 舊版 .claude/local/
+                home_path.join(".claude").join("local").join("claude.cmd"),
+            ];
+
+            for path in candidates {
+                if path.exists() {
+                    return path.to_string_lossy().to_string();
+                }
+            }
+        } else {
+            // macOS/Linux
+            let candidates = [
+                // 1. ~/.local/bin/claude
+                home_path.join(".local").join("bin").join("claude"),
+                // 2. ~/.claude/local/claude
+                home_path.join(".claude").join("local").join("claude"),
+            ];
+
+            for path in candidates {
+                if path.exists() {
+                    return path.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+
+    // Fallback: 依賴 PATH
+    if cfg!(windows) {
+        "claude.exe".to_string()
+    } else {
+        "claude".to_string()
+    }
+}
+
 /// 啟動 Claude CLI 程序（使用 stream-json 雙向通訊）
 pub async fn start_claude(
     app: AppHandle,
@@ -103,7 +150,7 @@ pub async fn start_claude(
 ) -> Result<(), String> {
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(get_claude_path());
     cmd.arg("-p")
         .arg("--input-format")
         .arg("stream-json")

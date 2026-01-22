@@ -33,10 +33,11 @@
 ### 設計理念
 「獨屬於理工男的溫暖戀愛感」——表面沉著但內心細膩，以實際行動代替言語表達情感。
 
-### 相關資源
-- 完整 RP 設定檔：`C:\Users\ATone\Downloads\Uni.md`
-- 外觀 Prompt：`1boy, crossed bangs, black hair, short hair, yellowish brown eyes, blue frame glasses, gentle and intellectual, masculine, gentle smile`
-- Avatar 圖片：`D:\7755\draw\Uni-Q.png`（Q版）
+### 相關資源（已整合至專案）
+- 完整 RP 設定檔：`assets/character/uni-full-setting.md`
+- 外觀 Prompt：`assets/character/uni-appearance.txt`
+- Avatar 圖片（Q版）：`assets/character/uni-avatar-q.png`
+- 表情圖片：`assets/character/tsunu-1.png` ~ `tsunu-4.png`
 - 有製作角色 LoRA 可用於生成更多圖片
 
 ## 技術架構
@@ -112,7 +113,7 @@
 
 ### Phase 3：人設整合 🔄 進行中
 - [x] 設定專案 CLAUDE.md（精簡版人設）
-- [ ] 建立 /uni Skill（完整 RP 設定）
+- [x] 建立 /uni Skill（完整 RP 設定）
 - [ ] 測試人設切換機制
 
 ### Phase 4：介面優化與權限確認 🔄 部分完成
