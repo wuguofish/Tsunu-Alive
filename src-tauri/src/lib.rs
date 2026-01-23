@@ -1,4 +1,5 @@
 mod claude;
+mod ide_server;
 
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -48,13 +49,14 @@ async fn send_to_claude(
     working_dir: Option<String>,
     allowed_tools: Option<Vec<String>>,
     permission_mode: Option<String>,
+    extended_thinking: Option<bool>,
 ) -> Result<(), String> {
     // 取得現有的 session_id
     let process = state.claude_process.clone();
     let session_id = claude::get_session_id(process.clone()).await;
 
     // 執行 Claude CLI
-    claude::run_claude(app, process, prompt, working_dir, session_id, allowed_tools, permission_mode).await
+    claude::run_claude(app, process, prompt, working_dir, session_id, allowed_tools, permission_mode, extended_thinking).await
 }
 
 /// 中斷 Claude 程序
@@ -80,6 +82,228 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     let process = state.claude_process.clone();
     claude::interrupt_claude(process).await?;
     Ok(())
+}
+
+/// 取得當前工作目錄
+#[tauri::command]
+fn get_working_directory() -> Result<String, String> {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| format!("Failed to get working directory: {}", e))
+}
+
+/// 檔案項目（用於 @-mention 選單）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileItem {
+    pub name: String,
+    pub path: String,       // 相對於工作目錄的路徑
+    pub is_dir: bool,
+}
+
+/// Session 項目（用於歷史對話列表）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionItem {
+    pub session_id: String,
+    pub created_at: String,      // ISO 8601 格式
+    pub last_modified: String,   // ISO 8601 格式
+    pub summary: Option<String>, // 對話摘要（第一條訊息）
+}
+
+/// 列出指定目錄下的檔案和資料夾（用於 @-mention 自動完成）
+#[tauri::command]
+fn list_files(
+    working_dir: String,
+    sub_path: Option<String>,
+    filter: Option<String>,
+) -> Result<Vec<FileItem>, String> {
+    let base_path = PathBuf::from(&working_dir);
+    let target_path = if let Some(ref sub) = sub_path {
+        base_path.join(sub)
+    } else {
+        base_path.clone()
+    };
+
+    if !target_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let entries = fs::read_dir(&target_path)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    let filter_lower = filter.map(|f| f.to_lowercase());
+
+    let mut items: Vec<FileItem> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // 過濾隱藏檔案和常見的忽略目錄
+            if name.starts_with('.') || name == "node_modules" || name == "target" || name == "dist" {
+                return None;
+            }
+
+            // 如果有過濾條件，檢查是否匹配
+            if let Some(ref filter) = filter_lower {
+                if !name.to_lowercase().contains(filter) {
+                    return None;
+                }
+            }
+
+            let metadata = entry.metadata().ok()?;
+            let is_dir = metadata.is_dir();
+
+            // 計算相對路徑
+            let relative_path = if let Some(ref sub) = sub_path {
+                format!("{}/{}", sub, name)
+            } else {
+                name.clone()
+            };
+
+            Some(FileItem {
+                name,
+                path: relative_path,
+                is_dir,
+            })
+        })
+        .collect();
+
+    // 排序：資料夾優先，然後按名稱排序
+    items.sort_by(|a, b| {
+        match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+
+    // 限制回傳數量
+    items.truncate(50);
+
+    Ok(items)
+}
+
+/// 計算專案路徑的 hash（用於定位 Claude CLI session 目錄）
+fn get_project_hash(working_dir: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    working_dir.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// 取得 Claude CLI 的 sessions 目錄
+fn get_claude_sessions_dir(working_dir: &str) -> Option<PathBuf> {
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var_os(home_var)?;
+    let home_path = PathBuf::from(home);
+
+    // Claude CLI 的專案資料存放在 ~/.claude/projects/[project-hash]/
+    let project_hash = get_project_hash(working_dir);
+    let sessions_dir = home_path
+        .join(".claude")
+        .join("projects")
+        .join(&project_hash);
+
+    if sessions_dir.exists() {
+        Some(sessions_dir)
+    } else {
+        None
+    }
+}
+
+/// 列出專案的歷史 sessions
+#[tauri::command]
+fn list_sessions(working_dir: String) -> Result<Vec<SessionItem>, String> {
+    let sessions_dir = match get_claude_sessions_dir(&working_dir) {
+        Some(dir) => dir,
+        None => return Ok(Vec::new()), // 沒有 session 目錄，回傳空列表
+    };
+
+    let mut sessions: Vec<SessionItem> = Vec::new();
+
+    // 讀取目錄中的 .jsonl 檔案
+    let entries = fs::read_dir(&sessions_dir)
+        .map_err(|e| format!("Failed to read sessions directory: {}", e))?;
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+
+        // 只處理 .jsonl 檔案
+        if path.extension().map(|e| e != "jsonl").unwrap_or(true) {
+            continue;
+        }
+
+        // 從檔名取得 session_id
+        let session_id = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+
+        // 取得檔案 metadata
+        let metadata = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        // 取得修改時間
+        let modified = metadata.modified().ok();
+        let created = metadata.created().ok();
+
+        let last_modified = modified
+            .map(|t| {
+                let datetime: chrono::DateTime<chrono::Local> = t.into();
+                datetime.to_rfc3339()
+            })
+            .unwrap_or_default();
+
+        let created_at = created
+            .map(|t| {
+                let datetime: chrono::DateTime<chrono::Local> = t.into();
+                datetime.to_rfc3339()
+            })
+            .unwrap_or_else(|| last_modified.clone());
+
+        // 嘗試讀取第一行來取得摘要
+        let summary = fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| {
+                content.lines().find_map(|line| {
+                    let json: serde_json::Value = serde_json::from_str(line).ok()?;
+                    // 尋找第一個 user message
+                    if json.get("type")?.as_str()? == "user" {
+                        json.get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_str())
+                            .map(|s| {
+                                // 截斷長文字
+                                if s.len() > 100 {
+                                    format!("{}...", &s[..100])
+                                } else {
+                                    s.to_string()
+                                }
+                            })
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        sessions.push(SessionItem {
+            session_id,
+            created_at,
+            last_modified,
+            summary,
+        });
+    }
+
+    // 按修改時間排序（最新的在前）
+    sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+
+    // 限制回傳數量
+    sessions.truncate(50);
+
+    Ok(sessions)
 }
 
 /// 將工具加入專案級白名單的核心邏輯
@@ -158,6 +382,28 @@ async fn add_project_permission(
     Ok(())
 }
 
+// ============================================================================
+// IDE Server Commands
+// ============================================================================
+
+/// 啟動 IDE WebSocket Server
+#[tauri::command]
+async fn start_ide_server() -> Result<(), String> {
+    ide_server::start_ide_server().await
+}
+
+/// 取得 IDE Server 狀態
+#[tauri::command]
+async fn get_ide_status() -> Result<ide_server::IdeServerStatus, String> {
+    Ok(ide_server::get_ide_status().await)
+}
+
+/// 取得當前 IDE context（用於發送給 Claude 時附加）
+#[tauri::command]
+async fn get_ide_context() -> Result<Option<ide_server::IdeContext>, String> {
+    Ok(ide_server::get_ide_context().await)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -173,8 +419,23 @@ pub fn run() {
             interrupt_claude,
             get_session_id,
             clear_session,
-            add_project_permission
+            add_project_permission,
+            get_working_directory,
+            list_files,
+            list_sessions,
+            start_ide_server,
+            get_ide_status,
+            get_ide_context
         ])
+        .setup(|_app| {
+            // 啟動 IDE WebSocket Server
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = ide_server::start_ide_server().await {
+                    eprintln!("⚠️ IDE Server 啟動失敗: {}", e);
+                }
+            });
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

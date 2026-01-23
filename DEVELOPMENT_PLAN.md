@@ -130,37 +130,86 @@
 
 ### Phase 4.5：核心介面功能（高優先級）
 
-- [ ] **Context 指示器 + Compact**
+- [x] **Context 指示器 + Compact** ✅
   - 顯示 context window 使用量百分比
-  - 100% 觸發自動壓縮
-  - 點擊可手動執行 `/compact`
-- [ ] **斜線選單功能實作**（目前只有 UI 外觀）
+  - 80% 警告樣式、95% 危險樣式
+  - hover 顯示 token 詳細資訊
+- [x] **斜線選單功能實作** ✅
   - `/model` - 切換 AI 模型
   - `/compact` - 手動壓縮上下文
-  - `/usage` - 查看使用情況
+  - `/cost` - 查看使用費用
   - `/clear` - 清除對話（新對話）
-- [ ] **@-Mention 功能**
-  - `@filename.ts` - 參考檔案
-  - `@folder/` - 參考資料夾
-  - `@file.ts#5-10` - 特定行號範圍
-- [ ] **工作目錄管理**
+- [x] **工作目錄管理** ✅
   - 顯示目前 Claude 工作目錄
-  - 動態取得工作目錄（目前 yes-always 的 workingDir 是寫死的）
-- [ ] **對話歷史管理**
-  - 搜尋過去對話
-  - 按時間瀏覽（Today, Yesterday, Last 7 days）
-  - 恢復過去對話
+  - 動態取得工作目錄（修復 yes-always 的 hardcoded 路徑）
+- [x] **@-Mention 功能** ✅
+  - `@filename.ts` - 參考檔案
+  - `@folder/` - 參考資料夾（支援導航進入）
+  - 自動完成選單，鍵盤導航（↑↓）和選擇（Enter/Tab）
+- [x] **對話歷史管理** ✅
+  - 顯示過去對話列表（按修改時間排序）
+  - 時間分類顯示（Today, Yesterday, N days ago）
+  - 點擊恢復過去對話（使用 --resume）
 
 ### Phase 4.6：增強體驗功能（中優先級）
 
-- [ ] **快捷鍵支援**
-  - `Ctrl+Esc` / `Cmd+Esc` - 切換焦點（輸入框 ↔ 對話）
+- [x] **快捷鍵支援** ✅
   - `Ctrl+N` / `Cmd+N` - 開始新對話
-  - `Ctrl+Shift+Esc` - 在新標籤開啟對話
-- [ ] **Extended Thinking 切換** - 讓 Claude 花更多時間推理
-- [ ] **目前讀取的檔案顯示** - 顯示 Claude 正在讀取/編輯的檔案
+  - `Ctrl+L` / `Cmd+L` - 清除輸入框
+  - `Escape` - 中斷請求 / 關閉選單
+  - `Ctrl+Shift+C` / `Cmd+Shift+C` - 執行 /compact
+- [x] **Extended Thinking 切換** ✅ - 讓 Claude 花更多時間推理（💭 按鈕）
+- [ ] **目前讀取的檔案顯示** - 顯示 Claude 正在讀取/編輯的檔案 (即 Phase 4.7)
 - [ ] **終端輸出參考** - `@terminal:name` 參考終端輸出
 - [ ] **多對話管理** - 新標籤、新視窗開啟對話
+
+### Phase 4.7：IDE 整合（`/ide` 功能）🔄 進行中
+
+- [x] **WebSocket Server** ✅
+  - Tauri 後端啟動 WebSocket server（預設 port: 19750）
+  - 支援多客戶端同時連接
+  - 連接狀態顯示在 UI 上（🔗 按鈕）
+- [x] **Context 協議設計** ✅
+  - JSON-RPC 格式訊息
+  - 支援的 method：`context/update`、`context/clear`、`selection/changed`
+  - 資料結構：檔案路徑、選取範圍、診斷資訊
+- [ ] **VS Code 插件（MVP）**
+  - 監聽編輯器選取變化
+  - 發送 context 到 Tsunu Alive
+  - 顯示連接狀態
+- [ ] **UI 顯示**
+  - IDE 連接狀態指示器
+  - 目前接收的 context（檔案名稱、選取行數）
+  - 快速插入 `@file#L1-10` 參考
+
+**技術架構：**
+
+```
+VS Code Extension ──WebSocket──▶ Tsunu Alive (WS Server)
+        │                              │
+        ▼                              ▼
+  監聽選取變化                    接收 context
+  發送 JSON-RPC                   顯示在 UI
+                                  注入到 prompt
+```
+
+**協議範例：**
+
+```json
+// IDE → Tsunu Alive
+{
+  "jsonrpc": "2.0",
+  "method": "context/update",
+  "params": {
+    "file_path": "src/App.vue",
+    "selection": {
+      "start": { "line": 10, "character": 0 },
+      "end": { "line": 20, "character": 50 }
+    },
+    "content": "selected code here..."
+  }
+}
+```
 
 ### Phase 5：進階功能（低優先級）
 
@@ -182,15 +231,16 @@
 
 ### 測試框架設定
 
-- [x] **前端測試 (Vitest + Vue Test Utils)** - 61 tests
+- [x] **前端測試 (Vitest + Vue Test Utils)** - 64 tests
   - 設定 Vitest 測試環境
   - PermissionDialog 元件測試 - 14 tests
   - ToolIndicator 元件測試 - 19 tests
-  - claudeEventHandler 邏輯測試 - 26 tests
+  - claudeEventHandler 邏輯測試 - 29 tests（含 context 相關）
   - sanity 測試 - 2 tests
-- [x] **後端測試 (Rust)** - 12 tests
-  - `parse_claude_output` 事件解析測試 - 8 tests
+- [x] **後端測試 (Rust)** - 16 tests
+  - `parse_claude_output` 事件解析測試 - 10 tests（含 context 相關）
   - `add_project_permission_core` 設定檔讀寫測試 - 4 tests
+  - `ide_server` JSON-RPC 解析與 context 序列化測試 - 3 tests
   - 權限解析邏輯（蛇底式/駝峰式欄位相容）
 
 ### 優先測試項目
@@ -203,9 +253,9 @@
 
 | 類別 | 測試數量 |
 | ------ | ---------- |
-| 前端 (Vitest) | 61 |
-| 後端 (Rust) | 12 |
-| **總計** | **73** |
+| 前端 (Vitest) | 64 |
+| 後端 (Rust) | 13 |
+| **總計** | **77** |
 
 ### CI 整合（可選）
 

@@ -1,0 +1,63 @@
+{
+  "name": "tsunu-alive-connector",
+  "displayName": "Tsunu Alive Connector",
+  "description": "連接 VS Code 與 Tsunu Alive，分享編輯器 Context",
+  "version": "0.1.0",
+  "publisher": "tsunu-alive",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tsunu-alive.connect",
+        "title": "Tsunu Alive: 連接"
+      },
+      {
+        "command": "tsunu-alive.disconnect",
+        "title": "Tsunu Alive: 斷開連接"
+      },
+      {
+        "command": "tsunu-alive.sendContext",
+        "title": "Tsunu Alive: 發送當前 Context"
+      }
+    ],
+    "configuration": {
+      "title": "Tsunu Alive",
+      "properties": {
+        "tsunuAlive.serverUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:19750",
+          "description": "Tsunu Alive WebSocket Server URL"
+        },
+        "tsunuAlive.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "啟動時自動連接"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  }
+}

@@ -269,6 +269,7 @@ pub async fn run_claude(
     session_id: Option<String>,
     allowed_tools: Option<Vec<String>>,
     permission_mode: Option<String>,
+    extended_thinking: Option<bool>,
 ) -> Result<(), String> {
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
@@ -299,6 +300,12 @@ pub async fn run_claude(
     // 如果有 permissionMode，加入參數
     if let Some(mode) = &permission_mode {
         cmd.arg("--permission-mode").arg(mode);
+    }
+
+    // 如果啟用 extended thinking
+    if extended_thinking.unwrap_or(false) {
+        eprintln!("🧠 Extended thinking enabled");
+        cmd.arg("--thinking");
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;

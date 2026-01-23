@@ -127,6 +127,18 @@ const messages = ref<Message[]>([
 // 輸入框內容
 const userInput = ref('');
 
+// @-Mention 相關狀態
+interface FileItem {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+const showMentionMenu = ref(false);
+const mentionFilter = ref('');
+const mentionFiles = ref<FileItem[]>([]);
+const mentionCursorPosition = ref(0);  // @ 符號的位置
+const mentionSelectedIndex = ref(0);   // 選單中選中的項目索引
+
 // 是否正在等待回應
 const isLoading = ref(false);
 
@@ -219,8 +231,25 @@ function cycleEditMode() {
   editMode.value = modes[(currentIndex + 1) % modes.length];
 }
 
-// 目前檔案（測試用）
-const currentFile = ref('App.vue');
+// Extended Thinking 模式
+const extendedThinking = ref(false);
+
+// 切換 Extended Thinking
+function toggleExtendedThinking() {
+  extendedThinking.value = !extendedThinking.value;
+  console.log('💭 Extended Thinking:', extendedThinking.value ? 'ON' : 'OFF');
+}
+
+// 工作目錄
+const workingDir = ref<string | null>(null);
+
+// 工作目錄資料夾名稱（用於 UI 顯示）
+const workingDirName = computed(() => {
+  if (!workingDir.value) return '—';
+  // 取得最後一個資料夾名稱（處理 Windows 和 Unix 路徑）
+  const parts = workingDir.value.split(/[\\/]/);
+  return parts[parts.length - 1] || parts[parts.length - 2] || '—';
+});
 
 // Context 用量（0-100，null 表示尚未取得）
 const contextUsage = ref<number | null>(null);
@@ -233,6 +262,47 @@ const contextInfo = ref<{
 
 // 斜線選單顯示狀態
 const showSlashMenu = ref(false);
+
+// 歷史對話相關
+interface SessionItem {
+  session_id: string;
+  created_at: string;
+  last_modified: string;
+  summary: string | null;
+}
+const showHistoryMenu = ref(false);
+const historySessions = ref<SessionItem[]>([]);
+const historyLoading = ref(false);
+
+// IDE 連接狀態
+interface IdeClient {
+  id: string;
+  name: string;
+  connected_at: string;
+}
+
+interface IdeContext {
+  file_path: string | null;
+  selected_text: string | null;
+  selection: {
+    start_line: number;
+    start_character: number;
+    end_line: number;
+    end_character: number;
+  } | null;
+  language_id: string | null;
+  last_updated: string | null;
+}
+
+interface IdeServerStatus {
+  running: boolean;
+  port: number;
+  connected_clients: IdeClient[];
+  current_context: IdeContext | null;
+}
+
+const ideStatus = ref<IdeServerStatus | null>(null);
+let ideStatusInterval: ReturnType<typeof setInterval> | null = null;
 
 // 待確認的權限請求
 const pendingPermission = ref<PendingPermission | null>(null);
@@ -484,9 +554,92 @@ async function setupEventListeners() {
   });
 }
 
-// 元件掛載時設定監聽
-onMounted(() => {
+// 全域快捷鍵處理
+function handleGlobalKeydown(e: KeyboardEvent) {
+  const isMac = navigator.userAgent.includes('Mac');
+  const ctrlOrCmd = isMac ? e.metaKey : e.ctrlKey;
+
+  // Ctrl/Cmd + N: 開始新對話
+  if (ctrlOrCmd && e.key === 'n') {
+    e.preventDefault();
+    startNewConversation();
+    return;
+  }
+
+  // Ctrl/Cmd + L: 清除輸入框
+  if (ctrlOrCmd && e.key === 'l') {
+    e.preventDefault();
+    userInput.value = '';
+    return;
+  }
+
+  // Escape: 中斷請求（如果正在載入）或關閉選單
+  if (e.key === 'Escape') {
+    if (showMentionMenu.value) {
+      closeMentionMenu();
+      return;
+    }
+    if (showSlashMenu.value) {
+      showSlashMenu.value = false;
+      return;
+    }
+    if (showHistoryMenu.value) {
+      showHistoryMenu.value = false;
+      return;
+    }
+    if (isLoading.value) {
+      e.preventDefault();
+      interruptRequest();
+      return;
+    }
+  }
+
+  // Ctrl/Cmd + Shift + C: 執行 /compact
+  if (ctrlOrCmd && e.shiftKey && e.key === 'C') {
+    e.preventDefault();
+    executeSlashCommand('/compact');
+    return;
+  }
+}
+
+// 開始新對話
+function startNewConversation() {
+  // 清除對話（與 /clear 相同）
+  messages.value = [
+    {
+      role: 'assistant',
+      items: [{ type: 'text', content: '好，我們開始新的對話吧！有什麼需要幫忙的嗎？ *推眼鏡*' }]
+    }
+  ];
+  sessionId.value = null;
+  contextUsage.value = null;
+  contextInfo.value = null;
+
+  // 聚焦到輸入框
+  const textarea = document.querySelector('textarea');
+  if (textarea) {
+    textarea.focus();
+  }
+}
+
+// 元件掛載時設定監聯並獲取工作目錄
+onMounted(async () => {
   setupEventListeners();
+
+  // 註冊全域快捷鍵
+  window.addEventListener('keydown', handleGlobalKeydown);
+
+  // 獲取當前工作目錄
+  try {
+    const dir = await invoke<string>('get_working_directory');
+    workingDir.value = dir;
+    console.log('📁 Working directory:', dir);
+  } catch (error) {
+    console.error('Failed to get working directory:', error);
+  }
+
+  // 開始輪詢 IDE 狀態
+  startIdeStatusPolling();
 });
 
 // 元件卸載時清理
@@ -495,6 +648,10 @@ onUnmounted(() => {
     unlistenClaude();
   }
   stopBusyTextAnimation();
+  stopIdeStatusPolling();
+
+  // 移除全域快捷鍵
+  window.removeEventListener('keydown', handleGlobalKeydown);
 });
 
 // 送出訊息（核心函數，支援 allowedTools）
@@ -528,7 +685,8 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
       prompt: content,
       workingDir: null,  // 使用預設目錄
       allowedTools: allAllowedTools.length > 0 ? allAllowedTools : null,
-      permissionMode: permissionMode
+      permissionMode: permissionMode,
+      extendedThinking: extendedThinking.value || null
     });
   } catch (error) {
     console.error('Failed to send to Claude:', error);
@@ -565,9 +723,241 @@ async function sendMessage() {
 
 // 按 Enter 送出（Shift+Enter 換行）
 function handleKeydown(e: KeyboardEvent) {
+  // 如果 @-mention 選單開啟，處理選單導航
+  if (showMentionMenu.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionSelectedIndex.value = Math.min(
+        mentionSelectedIndex.value + 1,
+        mentionFiles.value.length - 1
+      );
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionSelectedIndex.value = Math.max(mentionSelectedIndex.value - 1, 0);
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      if (mentionFiles.value.length > 0) {
+        selectMentionFile(mentionFiles.value[mentionSelectedIndex.value]);
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMentionMenu();
+      return;
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
+  }
+}
+
+// @-Mention: 處理輸入變化
+async function handleInput(e: Event) {
+  const target = e.target as HTMLTextAreaElement;
+  const value = target.value;
+  const cursorPos = target.selectionStart || 0;
+
+  // 尋找游標前最近的 @ 符號
+  const textBeforeCursor = value.substring(0, cursorPos);
+  const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+
+  if (lastAtIndex !== -1) {
+    // 檢查 @ 是否在單字開頭（前面是空白或開頭）
+    const charBefore = lastAtIndex > 0 ? textBeforeCursor[lastAtIndex - 1] : ' ';
+    if (charBefore === ' ' || charBefore === '\n' || lastAtIndex === 0) {
+      // 取得 @ 後面的過濾文字
+      const filterText = textBeforeCursor.substring(lastAtIndex + 1);
+
+      // 如果過濾文字包含空白，關閉選單
+      if (filterText.includes(' ')) {
+        closeMentionMenu();
+        return;
+      }
+
+      mentionCursorPosition.value = lastAtIndex;
+      mentionFilter.value = filterText;
+      mentionSelectedIndex.value = 0;
+
+      // 載入檔案列表
+      await loadMentionFiles(filterText);
+      showMentionMenu.value = true;
+      return;
+    }
+  }
+
+  closeMentionMenu();
+}
+
+// @-Mention: 載入檔案列表
+async function loadMentionFiles(filter: string) {
+  if (!workingDir.value) return;
+
+  try {
+    // 解析路徑：如果 filter 包含 /，取得子目錄
+    const parts = filter.split('/');
+    const subPath = parts.length > 1 ? parts.slice(0, -1).join('/') : null;
+    const nameFilter = parts[parts.length - 1];
+
+    const files = await invoke<FileItem[]>('list_files', {
+      workingDir: workingDir.value,
+      subPath: subPath,
+      filter: nameFilter || null,
+    });
+
+    mentionFiles.value = files;
+  } catch (error) {
+    console.error('Failed to load files:', error);
+    mentionFiles.value = [];
+  }
+}
+
+// @-Mention: 選擇檔案
+function selectMentionFile(file: FileItem) {
+  const value = userInput.value;
+  const beforeAt = value.substring(0, mentionCursorPosition.value);
+  const afterFilter = value.substring(
+    mentionCursorPosition.value + 1 + mentionFilter.value.length
+  );
+
+  // 如果是資料夾，加上 / 並繼續顯示選單
+  if (file.is_dir) {
+    userInput.value = beforeAt + '@' + file.path + '/' + afterFilter;
+    mentionFilter.value = file.path + '/';
+    mentionSelectedIndex.value = 0;
+    loadMentionFiles(file.path + '/');
+  } else {
+    // 如果是檔案，完成選擇
+    userInput.value = beforeAt + '@' + file.path + ' ' + afterFilter;
+    closeMentionMenu();
+  }
+}
+
+// @-Mention: 關閉選單
+function closeMentionMenu() {
+  showMentionMenu.value = false;
+  mentionFilter.value = '';
+  mentionFiles.value = [];
+  mentionSelectedIndex.value = 0;
+}
+
+// 歷史對話：載入 session 列表
+async function loadHistorySessions() {
+  if (!workingDir.value) return;
+
+  historyLoading.value = true;
+  try {
+    const sessions = await invoke<SessionItem[]>('list_sessions', {
+      workingDir: workingDir.value,
+    });
+    historySessions.value = sessions;
+  } catch (error) {
+    console.error('Failed to load sessions:', error);
+    historySessions.value = [];
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+// IDE Server：取得狀態
+async function refreshIdeStatus() {
+  try {
+    const status = await invoke<IdeServerStatus>('get_ide_status');
+    ideStatus.value = status;
+  } catch (error) {
+    console.error('Failed to get IDE status:', error);
+  }
+}
+
+// IDE Server：開始輪詢狀態
+function startIdeStatusPolling() {
+  refreshIdeStatus(); // 立即執行一次
+  ideStatusInterval = setInterval(refreshIdeStatus, 2000); // 每 2 秒更新
+}
+
+// IDE Server：停止輪詢
+function stopIdeStatusPolling() {
+  if (ideStatusInterval) {
+    clearInterval(ideStatusInterval);
+    ideStatusInterval = null;
+  }
+}
+
+// 計算 IDE 連接狀態文字
+const ideConnectionText = computed(() => {
+  if (!ideStatus.value) return 'IDE: —';
+  if (!ideStatus.value.running) return 'IDE: Off';
+  const clientCount = ideStatus.value.connected_clients.length;
+  if (clientCount === 0) return 'IDE: Waiting';
+  if (clientCount === 1) return `IDE: ${ideStatus.value.connected_clients[0].name}`;
+  return `IDE: ${clientCount} connected`;
+});
+
+// 計算 IDE 當前 context 顯示
+const ideContextDisplay = computed(() => {
+  if (!ideStatus.value?.current_context?.file_path) return null;
+  const ctx = ideStatus.value.current_context;
+  const fileName = ctx.file_path?.split(/[\\/]/).pop() || '';
+  if (ctx.selection) {
+    return `${fileName}:${ctx.selection.start_line + 1}`;
+  }
+  return fileName;
+});
+
+// 歷史對話：切換選單顯示
+async function toggleHistoryMenu() {
+  showSlashMenu.value = false; // 關閉斜線選單
+  showHistoryMenu.value = !showHistoryMenu.value;
+
+  if (showHistoryMenu.value) {
+    await loadHistorySessions();
+  }
+}
+
+// 歷史對話：恢復指定 session
+async function resumeSession(session: SessionItem) {
+  showHistoryMenu.value = false;
+
+  // 設定要恢復的 session ID
+  sessionId.value = session.session_id;
+
+  // 清除當前對話，準備恢復
+  messages.value = [
+    {
+      role: 'assistant',
+      items: [{ type: 'text', content: `*翻閱之前的筆記* 嗯，讓我看看我們上次聊到哪裡...` }]
+    }
+  ];
+  contextUsage.value = null;
+  contextInfo.value = null;
+
+  // 發送一個簡單的繼續訊息來恢復對話
+  await scrollToBottom();
+  lastPrompt.value = '/continue';
+  await sendMessageCore('/continue');
+}
+
+// 歷史對話：格式化時間顯示
+function formatSessionTime(isoString: string): string {
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return 'Today ' + date.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  } else if (diffDays === 1) {
+    return 'Yesterday';
+  } else if (diffDays < 7) {
+    return `${diffDays} days ago`;
+  } else {
+    return date.toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' });
   }
 }
 
@@ -644,17 +1034,25 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
     case 'yes-always':
       // 專案內永久允許：將所有這次被拒絕的工具寫入專案設定
       // 同時也加入 session 白名單
-      for (const deniedTool of deniedToolsThisRequest.value) {
-        sessionAllowedTools.value.add(deniedTool);
-        // 寫入專案設定
-        try {
-          await invoke('add_project_permission', {
-            workingDir: 'D:\\game\\tsunu_alive',  // TODO: 改成動態取得工作目錄
-            toolName: deniedTool
-          });
-          console.log(`Added project permission: ${deniedTool}`);
-        } catch (error) {
-          console.error(`Failed to add project permission for ${deniedTool}:`, error);
+      if (!workingDir.value) {
+        console.error('Working directory not set, cannot save project permission');
+        // Fallback to session-only permission
+        for (const deniedTool of deniedToolsThisRequest.value) {
+          sessionAllowedTools.value.add(deniedTool);
+        }
+      } else {
+        for (const deniedTool of deniedToolsThisRequest.value) {
+          sessionAllowedTools.value.add(deniedTool);
+          // 寫入專案設定
+          try {
+            await invoke('add_project_permission', {
+              workingDir: workingDir.value,
+              toolName: deniedTool
+            });
+            console.log(`Added project permission: ${deniedTool}`);
+          } catch (error) {
+            console.error(`Failed to add project permission for ${deniedTool}:`, error);
+          }
         }
       }
       if (lastPrompt.value) {
@@ -832,10 +1230,31 @@ async function interruptRequest() {
         <textarea
           v-model="userInput"
           @keydown="handleKeydown"
-          placeholder="Queue another message..."
+          @input="handleInput"
+          placeholder="Type @ to mention files..."
           :disabled="isLoading"
           rows="2"
         ></textarea>
+
+        <!-- @-Mention 選單 -->
+        <div v-if="showMentionMenu && mentionFiles.length > 0" class="mention-menu">
+          <div class="mention-header">
+            <span class="mention-icon">📄</span>
+            <span>Files</span>
+            <span class="mention-filter" v-if="mentionFilter">{{ mentionFilter }}</span>
+          </div>
+          <div
+            v-for="(file, index) in mentionFiles"
+            :key="file.path"
+            :class="['mention-item', { selected: index === mentionSelectedIndex }]"
+            @click="selectMentionFile(file)"
+            @mouseenter="mentionSelectedIndex = index"
+          >
+            <span class="mention-item-icon">{{ file.is_dir ? '📁' : '📄' }}</span>
+            <span class="mention-item-name">{{ file.name }}</span>
+            <span class="mention-item-path" v-if="mentionFilter.includes('/')">{{ file.path }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- 狀態列 -->
@@ -846,9 +1265,18 @@ async function interruptRequest() {
             <span class="mode-icon">▶</span>
             <span class="mode-label">{{ editModeLabels[editMode] }}</span>
           </button>
-          <button class="status-btn current-file" :title="currentFile">
-            <span class="file-icon">&lt;/&gt;</span>
-            <span class="file-name">{{ currentFile }}</span>
+          <button class="status-btn working-dir" :title="workingDir || '未知'">
+            <span class="dir-icon">📁</span>
+            <span class="dir-name">{{ workingDirName }}</span>
+          </button>
+          <button
+            class="status-btn thinking-toggle"
+            :class="{ active: extendedThinking }"
+            @click="toggleExtendedThinking"
+            title="Extended Thinking"
+          >
+            <span class="thinking-icon">💭</span>
+            <span class="thinking-label">{{ extendedThinking ? 'Thinking ON' : 'Thinking' }}</span>
           </button>
           <button
             class="status-btn context-usage"
@@ -858,14 +1286,30 @@ async function interruptRequest() {
             <span class="usage-icon">◐</span>
             <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
           </button>
+          <button
+            class="status-btn ide-status"
+            :class="{
+              connected: (ideStatus?.connected_clients?.length ?? 0) > 0,
+              waiting: ideStatus?.running && (ideStatus?.connected_clients?.length ?? 0) === 0,
+              off: !ideStatus?.running
+            }"
+            :title="ideStatus?.running ? `WebSocket port ${ideStatus?.port}` : 'IDE Server not running'"
+          >
+            <span class="ide-icon">🔗</span>
+            <span class="ide-text">{{ ideConnectionText }}</span>
+            <span v-if="ideContextDisplay" class="ide-context">{{ ideContextDisplay }}</span>
+          </button>
         </div>
 
         <!-- 右側按鈕 -->
         <div class="status-right">
+          <button class="status-btn history-btn" @click="toggleHistoryMenu" title="對話歷史">
+            <span class="history-icon">🕐</span>
+          </button>
           <button class="status-btn attach-btn" title="Attach files">
             <span class="attach-icon">📎</span>
           </button>
-          <button class="status-btn slash-btn" @click="showSlashMenu = !showSlashMenu" title="Commands">
+          <button class="status-btn slash-btn" @click="showSlashMenu = !showSlashMenu; showHistoryMenu = false" title="Commands">
             <span class="slash-icon">/</span>
           </button>
           <button
@@ -918,6 +1362,31 @@ async function interruptRequest() {
           <div v-if="contextInfo" class="slash-item context-info">
             <span>Tokens</span>
             <span class="slash-hint">{{ contextInfo.totalTokens?.toLocaleString() || '?' }} / {{ contextInfo.maxTokens?.toLocaleString() || '?' }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 歷史對話選單 -->
+      <div v-if="showHistoryMenu" class="history-menu">
+        <div class="history-header">
+          <span class="history-title">🕐 對話歷史</span>
+          <button class="history-close" @click="showHistoryMenu = false">✕</button>
+        </div>
+        <div v-if="historyLoading" class="history-loading">
+          載入中...
+        </div>
+        <div v-else-if="historySessions.length === 0" class="history-empty">
+          還沒有對話歷史
+        </div>
+        <div v-else class="history-list">
+          <div
+            v-for="session in historySessions"
+            :key="session.session_id"
+            class="history-item"
+            @click="resumeSession(session)"
+          >
+            <div class="history-item-time">{{ formatSessionTime(session.last_modified) }}</div>
+            <div class="history-item-summary">{{ session.summary || '(無摘要)' }}</div>
           </div>
         </div>
       </div>
@@ -1221,6 +1690,77 @@ body {
 /* 輸入框包裝 */
 .input-wrapper {
   width: 100%;
+  position: relative;
+}
+
+/* @-Mention 選單 */
+.mention-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  margin-bottom: 4px;
+  z-index: 100;
+}
+
+.mention-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.mention-icon {
+  font-size: 1rem;
+}
+
+.mention-filter {
+  margin-left: auto;
+  font-family: monospace;
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.mention-item:hover,
+.mention-item.selected {
+  background-color: var(--primary-color);
+}
+
+.mention-item-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.mention-item-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-item-path {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: monospace;
 }
 
 textarea {
@@ -1289,9 +1829,28 @@ textarea:disabled {
 }
 
 .mode-icon,
-.file-icon,
+.dir-icon,
 .usage-icon {
   font-size: 0.75rem;
+}
+
+/* Extended Thinking 按鈕 */
+.thinking-toggle {
+  transition: all 0.2s;
+}
+
+.thinking-toggle.active {
+  color: #9b59b6;
+  background-color: rgba(155, 89, 182, 0.15);
+}
+
+.thinking-toggle.active .thinking-icon {
+  animation: thinking-pulse 1.5s infinite;
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
 }
 
 /* Context usage 警告樣式 */
@@ -1320,6 +1879,51 @@ textarea:disabled {
 @keyframes pulse-danger {
   0%, 100% { opacity: 0.5; transform: scale(1); }
   50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* IDE 連接狀態 */
+.ide-status {
+  transition: all 0.2s;
+}
+
+.ide-status.connected {
+  color: #2ecc71;
+}
+
+.ide-status.connected .ide-icon {
+  animation: ide-connected 2s infinite;
+}
+
+.ide-status.waiting {
+  color: #f39c12;
+}
+
+.ide-status.waiting .ide-icon {
+  animation: ide-waiting 1.5s infinite;
+}
+
+.ide-status.off {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.ide-context {
+  font-family: monospace;
+  font-size: 0.75rem;
+  background-color: rgba(46, 204, 113, 0.2);
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+@keyframes ide-connected {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes ide-waiting {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 .slash-icon {
@@ -1423,6 +2027,88 @@ textarea:disabled {
 
 .slash-toggle {
   font-size: 1.2rem;
+}
+
+/* 歷史對話選單 */
+.history-menu {
+  position: absolute;
+  bottom: 100%;
+  right: 20px;
+  width: 360px;
+  max-height: 400px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.history-title {
+  font-weight: 500;
+}
+
+.history-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 4px;
+}
+
+.history-close:hover {
+  color: var(--text-color);
+}
+
+.history-loading,
+.history-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.history-list {
+  overflow-y: auto;
+  max-height: 340px;
+}
+
+.history-item {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.history-item:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.history-item:last-child {
+  border-bottom: none;
+}
+
+.history-item-time {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.history-item-summary {
+  font-size: 0.9rem;
+  color: var(--text-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 右側：Avatar 面板 */
