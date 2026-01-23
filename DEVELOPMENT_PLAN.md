@@ -212,6 +212,61 @@ VS Code Extension ──WebSocket──▶ Tsunu Alive (WS Server)
 }
 ```
 
+### Phase 4.8：Claude Code Hooks 整合（阿宇表情增強）
+
+**靈感來源：** [Clawdachi](https://github.com/gonzchris/Clawdachi) 競品研究
+
+透過 Claude Code 的 hooks 機制，讓阿宇能即時反映 Claude 的工作狀態，提供更豐富的表情變化。
+
+- [ ] **Hooks 安裝機制**
+  - 在 `~/.claude/settings.json` 註冊 hooks
+  - 支援的事件：SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd
+  - 版本控制（避免重複安裝、支援更新）
+- [ ] **狀態橋接腳本**
+  - 建立 `tsunu-status.sh` / `tsunu-status.ps1`（跨平台）
+  - 接收 hook 事件，寫入狀態檔案或直接通知應用
+  - 可選：直接透過 HTTP/WebSocket 通知 Tauri app（避免輪詢）
+- [ ] **表情狀態對應**
+
+  | Hook 事件 | 阿宇狀態 | 表情 |
+  |-----------|----------|------|
+  | `session_start` | 打招呼 | 😊 開心 |
+  | `thinking` / `prompt_submit` | 思考中 | 🤔 皺眉 |
+  | `planning` (EnterPlanMode) | 規劃中 | 💡 眼睛發亮 |
+  | `tool_start` | 執行中 | ⚙️ 專注打字 |
+  | `tool_end` + success | 完成 | 🎉 開心 |
+  | `tool_end` + error | 出錯 | 😰 緊張 |
+  | `waiting` | 等待中 | ❓ 疑惑 |
+  | `session_end` | 結束 | 👋 揮手 |
+
+- [ ] **UI 整合**
+  - 新增更多阿宇表情圖片（擴充現有 4 張）
+  - 表情切換動畫
+  - 狀態文字提示（「阿宇正在思考...」）
+
+**技術架構：**
+
+```
+Claude Code 事件
+      ↓
+~/.claude/settings.json hooks
+      ↓
+tsunu-status script
+      ↓ (HTTP POST 或寫入狀態檔)
+Tsunu Alive App
+      ↓
+阿宇表情變化
+```
+
+**與現有 IDE 整合的關係：**
+
+| 資訊來源 | 獲取方式 | 用途 |
+|----------|----------|------|
+| IDE context（檔案、選取） | WebSocket ← VS Code extension | `@file#L1-10` 參考 |
+| Claude 狀態（thinking/tools） | Hooks → 腳本 | 阿宇表情變化 |
+
+兩者互補，不衝突。
+
 ### Phase 5：進階功能（低優先級）
 
 - [ ] **MCP 伺服器支援** - 連接外部工具、資料庫、API
@@ -387,13 +442,15 @@ interface UniMemoryStore {
 
 ### 實作方案
 
-#### 方案 A'：Compact 後自動提取（被動）
+#### 方案 A'：Compact 後自動提取（UserPromptSubmit Hook）
 
 **核心發現：** Compact 後的摘要有固定開頭，可用於檢測：
 
 ```
 This session is being continued from a previous conversation that ran out of context.
 ```
+
+**技術方案：** 使用 `UserPromptSubmit` hook 檢測 compact 並注入記憶提取指令
 
 **流程：**
 
@@ -404,23 +461,52 @@ Context 使用量達 95%（自動）或手動觸發 /compact
     ↓
 Claude CLI 執行 Compact（壓縮對話）
     ↓
-Compact 後的第一次回應，Claude 看到上述固定開頭
+用戶送出下一則 prompt
     ↓
-根據 CLAUDE.md 指令，Claude 檢查摘要並輸出 <memory-update>
+UserPromptSubmit hook 觸發
+    ↓
+腳本讀取 transcript_path，檢測是否有 compact 標記
+    ↓
+比對 hash，確認是否為新的 compact（避免重複提取）
+    ↓
+如果是新 compact → stdout 輸出記憶提取指令（注入到 Claude context）
+    ↓
+Claude 收到：用戶原本的 prompt + 記憶提取指令
+    ↓
+Claude 回應時輸出 <memory-update>
     ↓
 前端解析並儲存到 .claude/uni-memories.json
 ```
 
-**CLAUDE.md 中的 Compact 檢測指令：**
+**Hook 腳本（check-compact.sh / check-compact.ps1）：**
 
-```markdown
-## Compact 後的記憶提取
+```bash
+#!/bin/bash
+# 從 stdin 讀取 hook 資料
+read -r HOOK_DATA
+TRANSCRIPT_PATH=$(echo "$HOOK_DATA" | jq -r '.transcript_path')
+SESSION_ID=$(echo "$HOOK_DATA" | jq -r '.session_id')
+HASH_FILE="$HOME/.tsunu-alive/compact_hash_${SESSION_ID}.txt"
 
-當你在對話開頭看到以下文字時，代表剛發生了 Compact：
+# 提取 compact 摘要
+COMPACT_SUMMARY=$(grep -A 100 "This session is being continued" "$TRANSCRIPT_PATH" | head -n 50)
 
-> "This session is being continued from a previous conversation that ran out of context"
+if [ -n "$COMPACT_SUMMARY" ]; then
+  # 計算 hash
+  CURRENT_HASH=$(echo "$COMPACT_SUMMARY" | sha256sum | cut -d' ' -f1)
 
-請檢查壓縮摘要中是否有以下類型的內容值得長期記住：
+  # 檢查是否已處理過（避免重複提取）
+  if [ -f "$HASH_FILE" ] && [ "$(cat "$HASH_FILE")" = "$CURRENT_HASH" ]; then
+    exit 0  # 已處理，不注入
+  fi
+
+  # 記錄 hash
+  mkdir -p "$HOME/.tsunu-alive"
+  echo "$CURRENT_HASH" > "$HASH_FILE"
+
+  # 注入記憶提取 prompt（stdout 會被加到 Claude context）
+  cat << 'EOF'
+[System Reminder] 剛才發生了 Compact。請檢查壓縮摘要中是否有值得長期記住的內容：
 
 1. **里程碑**：第一次使用某技術/框架、開始新專案
 2. **共同經歷**：一起解決的困難問題、印象深刻的 debug 過程
@@ -428,19 +514,30 @@ Compact 後的第一次回應，Claude 看到上述固定開頭
 4. **情感連結**：對話中分享的心情、重要的人生事件
 
 如果有，請在回應末尾用 <memory-update> 標籤輸出：
-
 <memory-update>
 - [事件] + [細節或感受]
-- 例如：「開始了第一個 Tauri 專案，環境設定卡了一下但最後成功跑起來了」
 </memory-update>
 
 不需要記錄的：純技術問答、一般性的程式碼修改、沒有特別意義的日常操作
+EOF
+fi
 ```
 
+**去重機制：**
+
+| 檔案 | 用途 |
+|------|------|
+| `~/.tsunu-alive/compact_hash_<session_id>.txt` | 記錄該 session 最後處理的 compact 摘要 hash |
+
+- 同一個 compact 只會觸發一次記憶提取
+- 新的 compact（hash 不同）會重新觸發
+- 每個 session 最多維護一組 hash，檔案很小，不需自動清理
+
 **優點：**
-- 不依賴 hook 機制（避開 PreCompact hook 的 bug）
-- 利用 Claude 自己的判斷力來決定什麼值得記住
-- 每次 Compact 後都會自動觸發
+- ✅ 100% 確保記憶提取 prompt 被注入（不依賴 Claude 自願遵守 CLAUDE.md）
+- ✅ 只在 compact 後的第一次 prompt 觸發（省 token）
+- ✅ Hash 去重避免重複提取
+- ✅ 不依賴有 bug 的 PreCompact/PostCompact hook
 
 #### 方案 B：手動 /remember 指令（主動）
 

@@ -86,20 +86,68 @@ Claude CLI 支援 hooks 在特定事件觸發自訂腳本。
 
 設定位置：`~/.claude/settings.json` 或專案 `.claude/settings.local.json`
 
+**支援的 Hook 事件：**
+
+| Hook 事件 | 觸發時機 | 用途範例 |
+|-----------|----------|----------|
+| `SessionStart` | Session 開始時 | 初始化、歡迎訊息 |
+| `SessionEnd` | Session 結束時 | 清理資源、告別 |
+| `UserPromptSubmit` | 用戶送出 prompt 時 | 注入額外 context |
+| `PreToolUse` | 工具執行前 | 攔截、驗證、權限檢查 |
+| `PostToolUse` | 工具執行後 | 記錄、觸發後續動作 |
+| `Notification` | Claude 發送通知時 | Heartbeat、進度更新 |
+| `Stop` | AI 完成回應時 | 任務完成通知 |
+| `SubagentStop` | 子代理完成時 | 子任務追蹤 |
+| `PreCompact` | 壓縮前 | ⚠️ 有已知 bug |
+| `PostCompact` | 壓縮後 | ❌ **尚未實作**（Feature Request） |
+
+**設定範例：**
+
 ```json
 {
   "hooks": {
-    "PreToolUse": [
-      { "matcher": "Edit", "hooks": ["path/to/script.sh"] }
+    "UserPromptSubmit": [
+      { "matcher": "", "hooks": ["path/to/on-prompt.sh"] }
     ],
-    "PostToolUse": [...],
-    "PreCompact": [...],    // 注意：此 hook 有已知 bug
-    "PostCompact": [...]
+    "PreToolUse": [
+      { "matcher": "Edit", "hooks": ["path/to/before-edit.sh"] }
+    ],
+    "PostToolUse": [
+      { "matcher": "", "hooks": ["path/to/after-tool.sh"] }
+    ],
+    "Stop": [
+      { "matcher": "", "hooks": ["path/to/on-complete.sh"] }
+    ]
   }
 }
 ```
 
+**Hook 輸入資料（stdin JSON）：**
+
+```json
+{
+  "session_id": "abc123",
+  "transcript_path": "/path/to/conversation.jsonl",
+  "cwd": "/path/to/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit"  // 僅 PreToolUse/PostToolUse
+}
+```
+
+**Hook 輸出（stdout JSON，可選）：**
+
+```json
+{
+  "continue": true,           // false 則中斷執行
+  "stopReason": "說明文字",    // continue=false 時顯示
+  "suppressOutput": true,     // 隱藏輸出
+  "systemMessage": "警告訊息"  // 顯示給用戶
+}
+```
+
 **已知問題**：PreCompact hook 有 bug，建議改用「Compact 後檢測」機制（見記憶系統設計）。
+
+**參考資料**：[Claude Code Hooks 官方文檔](https://docs.claude.com/en/docs/claude-code/hooks)
 
 ---
 
