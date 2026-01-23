@@ -267,4 +267,235 @@ describe('ToolIndicator', () => {
       expect(wrapper.text()).toContain('Starting background agent')
     })
   })
+
+  describe('Task Tool Specific', () => {
+    it('renders description in header', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Task',
+          description: 'Explore codebase structure',
+        },
+      })
+
+      expect(wrapper.find('.tool-description').exists()).toBe(true)
+      expect(wrapper.find('.tool-description').text()).toBe('Explore codebase structure')
+    })
+
+    it('renders prompt in content block', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Task',
+          description: 'Explore codebase',
+          prompt: 'Search for all Vue components in the project',
+        },
+      })
+
+      expect(wrapper.find('.tool-block').exists()).toBe(true)
+      expect(wrapper.find('.block-label').text()).toBe('PROMPT')
+      expect(wrapper.text()).toContain('Search for all Vue components')
+    })
+
+    it('renders output when provided', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Task',
+          description: 'Explore codebase',
+          prompt: 'Search task',
+          output: 'Found 5 Vue components...',
+        },
+      })
+
+      expect(wrapper.findAll('.tool-block').length).toBe(2)
+      const labels = wrapper.findAll('.block-label')
+      expect(labels[0].text()).toBe('PROMPT')
+      expect(labels[1].text()).toBe('RESULT')
+      expect(wrapper.text()).toContain('Found 5 Vue components')
+    })
+  })
+
+  describe('WebSearch Tool Specific', () => {
+    it('renders query in header', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'WebSearch',
+          query: 'Claude Code hooks documentation',
+        },
+      })
+
+      expect(wrapper.find('.tool-pattern').exists()).toBe(true)
+      expect(wrapper.find('.tool-pattern').text()).toBe('"Claude Code hooks documentation"')
+    })
+
+    it('renders query in content block', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'WebSearch',
+          query: 'Claude Code hooks documentation',
+        },
+      })
+
+      expect(wrapper.find('.tool-block').exists()).toBe(true)
+      expect(wrapper.find('.block-label').text()).toBe('QUERY')
+    })
+
+    it('renders result when provided', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'WebSearch',
+          query: 'test query',
+          output: 'Search results here...',
+        },
+      })
+
+      expect(wrapper.findAll('.tool-block').length).toBe(2)
+      const labels = wrapper.findAll('.block-label')
+      expect(labels[0].text()).toBe('QUERY')
+      expect(labels[1].text()).toBe('RESULT')
+    })
+  })
+
+  describe('WebFetch Tool Specific', () => {
+    it('renders URL in header', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'WebFetch',
+          query: 'https://example.com/api/docs',
+        },
+      })
+
+      expect(wrapper.find('.tool-pattern').exists()).toBe(true)
+      expect(wrapper.find('.tool-pattern').text()).toBe('"https://example.com/api/docs"')
+    })
+
+    it('renders URL in content block', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'WebFetch',
+          query: 'https://example.com/api/docs',
+        },
+      })
+
+      expect(wrapper.find('.tool-block').exists()).toBe(true)
+      expect(wrapper.find('.block-label').text()).toBe('URL')
+    })
+
+    it('renders response when provided', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'WebFetch',
+          query: 'https://example.com',
+          output: 'Page content...',
+        },
+      })
+
+      expect(wrapper.findAll('.tool-block').length).toBe(2)
+      const labels = wrapper.findAll('.block-label')
+      expect(labels[0].text()).toBe('URL')
+      expect(labels[1].text()).toBe('RESPONSE')
+    })
+  })
+
+  describe('Grep Tool Specific', () => {
+    it('renders pattern in header', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Grep',
+          pattern: 'function.*test',
+        },
+      })
+
+      expect(wrapper.find('.tool-pattern').exists()).toBe(true)
+      expect(wrapper.find('.tool-pattern').text()).toBe('"function.*test"')
+    })
+
+    it('shows line count in summary when output provided', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Grep',
+          pattern: 'test',
+          output: 'line1\nline2\nline3',
+        },
+      })
+
+      expect(wrapper.find('.tool-summary').text()).toBe('3 lines of output')
+    })
+
+    it('shows singular line for 1 result', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Grep',
+          pattern: 'test',
+          output: 'only one line',
+        },
+      })
+
+      expect(wrapper.find('.tool-summary').text()).toBe('1 line of output')
+    })
+
+    it('renders path info when provided', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Grep',
+          pattern: 'test',
+          path: 'src/utils',
+          output: 'found it',
+        },
+      })
+
+      expect(wrapper.find('.tool-info').exists()).toBe(true)
+      expect(wrapper.find('.tool-info').text()).toContain('src/utils')
+    })
+
+    it('renders output in content', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Grep',
+          pattern: 'test',
+          output: 'file.ts:10: const test = 1',
+        },
+      })
+
+      expect(wrapper.find('.tool-block.output').exists()).toBe(true)
+      expect(wrapper.find('.block-label').text()).toBe('MATCHES')
+    })
+  })
+
+  describe('Glob Tool Specific', () => {
+    it('renders pattern in header', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Glob',
+          pattern: '**/*.ts',
+        },
+      })
+
+      expect(wrapper.find('.tool-pattern').exists()).toBe(true)
+      expect(wrapper.find('.tool-pattern').text()).toBe('"**/*.ts"')
+    })
+
+    it('shows file count in summary', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Glob',
+          pattern: '*.vue',
+          output: 'App.vue\nMain.vue',
+        },
+      })
+
+      expect(wrapper.find('.tool-summary').text()).toBe('2 lines of output')
+    })
+
+    it('renders files list in content', () => {
+      const wrapper = mount(ToolIndicator, {
+        props: {
+          type: 'Glob',
+          pattern: '*.ts',
+          output: 'index.ts\nutils.ts',
+        },
+      })
+
+      expect(wrapper.find('.tool-block.output').exists()).toBe(true)
+      expect(wrapper.find('.block-label').text()).toBe('FILES')
+    })
+  })
 })

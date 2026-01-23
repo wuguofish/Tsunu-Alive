@@ -6,55 +6,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ToolIndicator from "./components/ToolIndicator.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
+import AskUserQuestionDialog from "./components/AskUserQuestionDialog.vue";
+import SessionSelector from "./components/SessionSelector.vue";
+import { useTabManager } from "./composables/useTabManager";
+import {
+  handleClaudeEvent as processClaudeEvent,
+  type ClaudeEvent,
+  type PendingPermission,
+  type ToolUseItem,
+  type Message,
+  type AppState,
+  type EventAction,
+  type EditMode,
+  type AvatarState,
+} from "./utils/claudeEventHandler";
 
-// Claude 事件類型定義
-interface ClaudeEvent {
-  event_type: 'Init' | 'Text' | 'ToolUse' | 'PermissionDenied' | 'ToolResult' | 'Complete' | 'Error' | 'Connected';
-  session_id?: string;
-  model?: string;
-  text?: string;
-  is_complete?: boolean;
-  tool_name?: string;
-  tool_id?: string;
-  input?: Record<string, unknown>;
-  result?: string;
-  is_error?: boolean;
-  cost_usd?: number;
-  message?: string;
-  // Context 相關資訊（Complete 事件）
-  total_tokens_in_conversation?: number;
-  context_window_max?: number;
-  context_window_used_percent?: number;
-}
-
-// 待確認的權限請求
-interface PendingPermission {
-  toolName: string;
-  toolId: string;
-  input: Record<string, unknown>;
-}
-
-// 工具使用項目
-interface ToolUseItem {
-  id: string;
-  type: string;
-  name: string;
-  input: Record<string, unknown>;
-  result?: string;
-  isCancelled?: boolean;
-  userResponse?: string;  // 使用者拒絕或自訂的回應
-}
-
-// 對話項目（文字或工具，按時間順序）
-type ChatItem =
-  | { type: 'text'; content: string }
-  | { type: 'tool'; tool: ToolUseItem };
-
-// 訊息類型（包含按時間順序的項目）
-interface Message {
-  role: 'user' | 'assistant';
-  items: ChatItem[];  // 按時間順序的項目（文字和工具穿插）
-}
+// Tab Manager
+const tabManager = useTabManager();
 
 // 目前的 session ID
 const sessionId = ref<string | null>(null);
@@ -98,9 +66,6 @@ marked.use({ renderer });
 function renderMarkdown(content: string): string {
   return marked.parse(content) as string;
 }
-
-// 阿宇的表情狀態
-type AvatarState = 'idle' | 'processing' | 'complete' | 'waiting';
 
 // Avatar 圖片對應
 const avatarImages: Record<AvatarState, string> = {
@@ -215,18 +180,25 @@ function stopBusyTextAnimation() {
   busyStatus.value = '';
 }
 
-// 編輯模式
-type EditMode = 'ask' | 'auto' | 'plan';
-const editMode = ref<EditMode>('ask');
+// 編輯模式（變數名稱對齊 Claude CLI，Label 對齊 VS Code）
+const editMode = ref<EditMode>('default');
 const editModeLabels: Record<EditMode, string> = {
-  ask: 'Ask before edits',
-  auto: 'Edit automatically',
+  default: 'Ask before edits',
+  acceptEdits: 'Edit automatically',   // Edit/Write 免確認，Bash 仍需確認
+  bypassPermissions: 'Trust all',      // 全部跳過確認
   plan: 'Plan Mode'
+};
+
+const editModeIcons: Record<EditMode, string> = {
+  default: '▶',
+  acceptEdits: '⏩︎',
+  bypassPermissions: '⚡',
+  plan: '⏸'  // pause
 };
 
 // 切換編輯模式
 function cycleEditMode() {
-  const modes: EditMode[] = ['ask', 'auto', 'plan'];
+  const modes: EditMode[] = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
   const currentIndex = modes.indexOf(editMode.value);
   editMode.value = modes[(currentIndex + 1) % modes.length];
 }
@@ -260,6 +232,15 @@ const contextInfo = ref<{
   maxTokens?: number;
 } | null>(null);
 
+// Context 用量圖示（根據用量百分比顯示不同的圓圈）
+const contextUsageIcon = computed(() => {
+  const usage = contextUsage.value;
+  if (usage === null || usage < 50) return '◯';  // 空心
+  if (usage < 75) return '◑';  // 半滿
+  if (usage < 95) return '◕';  // 快滿
+  return '◉';  // 全滿
+});
+
 // 斜線選單顯示狀態
 const showSlashMenu = ref(false);
 
@@ -270,7 +251,6 @@ interface SessionItem {
   last_modified: string;
   summary: string | null;
 }
-const showHistoryMenu = ref(false);
 const historySessions = ref<SessionItem[]>([]);
 const historyLoading = ref(false);
 
@@ -307,6 +287,27 @@ let ideStatusInterval: ReturnType<typeof setInterval> | null = null;
 // 待確認的權限請求
 const pendingPermission = ref<PendingPermission | null>(null);
 
+// AskUserQuestion 的問題類型
+interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+interface Question {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+}
+
+interface PendingQuestion {
+  toolId: string;
+  questions: Question[];
+}
+
+// 待回答的問題（AskUserQuestion 工具）
+const pendingQuestion = ref<PendingQuestion | null>(null);
+
 // 對話區域的參考，用於自動滾動
 const chatContainer = ref<HTMLElement | null>(null);
 
@@ -318,233 +319,113 @@ async function scrollToBottom() {
   }
 }
 
-// 加入工具使用記錄（避免重複）
-// 取得或建立當前的 assistant 訊息
-function getOrCreateAssistantMessage(): Message {
-  const lastMsg = messages.value[messages.value.length - 1];
-  if (lastMsg && lastMsg.role === 'assistant') {
-    return lastMsg;
-  }
-  // 建立新的 assistant 訊息（items 陣列用於按時間順序存放文字和工具）
-  const newMsg: Message = {
-    role: 'assistant',
-    items: []
-  };
-  messages.value.push(newMsg);
-  return newMsg;
-}
+// 複製文字到剪貼簿
+const copiedIndex = ref<string | null>(null);
 
-function addToolUse(toolName: string, toolId: string, input: Record<string, unknown>) {
-  // 取得當前的 assistant 訊息
-  const assistantMsg = getOrCreateAssistantMessage();
-
-  // 用 tool_id 檢查是否已存在於 items 中
-  const existingById = assistantMsg.items.find(
-    (item): item is { type: 'tool'; tool: ToolUseItem } =>
-      item.type === 'tool' && item.tool.id === toolId
-  );
-  if (existingById) return; // 已存在，直接返回
-
-  // 額外檢查：如果是同類型工具且 input 完全相同，也視為重複（stream 重複發送的情況）
-  const inputJson = JSON.stringify(input);
-  const existingByInput = assistantMsg.items.find(
-    (item): item is { type: 'tool'; tool: ToolUseItem } =>
-      item.type === 'tool' &&
-      item.tool.type === toolName &&
-      JSON.stringify(item.tool.input) === inputJson
-  );
-
-  if (!existingByInput) {
-    // 在 items 中按時間順序添加工具項目
-    assistantMsg.items.push({
-      type: 'tool',
-      tool: {
-        id: toolId,
-        type: toolName,
-        name: toolName,
-        input: input
+async function copyToClipboard(content: string, itemKey: string) {
+  try {
+    await navigator.clipboard.writeText(content);
+    copiedIndex.value = itemKey;
+    // 2 秒後重置
+    setTimeout(() => {
+      if (copiedIndex.value === itemKey) {
+        copiedIndex.value = null;
       }
-    });
-  }
-
-  // 同時更新 currentToolUses（用於權限確認時的引用）
-  if (!currentToolUses.value.find(t => t.id === toolId)) {
-    currentToolUses.value.push({
-      id: toolId,
-      type: toolName,
-      name: toolName,
-      input: input
-    });
+    }, 2000);
+  } catch (err) {
+    console.error('Failed to copy:', err);
   }
 }
 
-// 處理 Claude 事件
+// 取得當前 App 狀態（用於事件處理）
+function getCurrentAppState(): AppState {
+  return {
+    sessionId: sessionId.value,
+    currentModel: currentModel.value,
+    streamingText: streamingText.value,
+    messages: messages.value,
+    currentToolUses: currentToolUses.value,
+    deniedToolsThisRequest: deniedToolsThisRequest.value,
+    pendingPermission: pendingPermission.value,
+    avatarState: avatarState.value,
+    busyStatus: busyStatus.value,
+    isLoading: isLoading.value,
+    editMode: editMode.value,
+    contextUsage: contextUsage.value,
+    contextInfo: contextInfo.value,
+  };
+}
+
+// 應用事件處理結果到 Vue refs
+function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: EventAction[] }) {
+  const { stateUpdates, actions } = result;
+
+  // 應用狀態更新
+  if (stateUpdates.sessionId !== undefined) sessionId.value = stateUpdates.sessionId;
+  if (stateUpdates.currentModel !== undefined) currentModel.value = stateUpdates.currentModel;
+  if (stateUpdates.streamingText !== undefined) streamingText.value = stateUpdates.streamingText;
+  if (stateUpdates.messages !== undefined) messages.value = stateUpdates.messages;
+  if (stateUpdates.currentToolUses !== undefined) currentToolUses.value = stateUpdates.currentToolUses;
+  if (stateUpdates.deniedToolsThisRequest !== undefined) deniedToolsThisRequest.value = stateUpdates.deniedToolsThisRequest;
+  if (stateUpdates.pendingPermission !== undefined) pendingPermission.value = stateUpdates.pendingPermission;
+  if (stateUpdates.avatarState !== undefined) avatarState.value = stateUpdates.avatarState;
+  if (stateUpdates.busyStatus !== undefined) busyStatus.value = stateUpdates.busyStatus;
+  if (stateUpdates.isLoading !== undefined) isLoading.value = stateUpdates.isLoading;
+  if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
+  if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
+
+  // 執行副作用動作
+  for (const action of actions) {
+    switch (action.type) {
+      case 'scrollToBottom':
+        scrollToBottom();
+        break;
+      case 'stopBusyTextAnimation':
+        stopBusyTextAnimation();
+        break;
+      case 'startCompleteTimer':
+        // 3 秒後回到待機表情
+        setTimeout(() => {
+          avatarState.value = 'idle';
+        }, 3000);
+        break;
+      case 'addErrorMessage':
+        messages.value.push({
+          role: 'assistant',
+          items: [{ type: 'text', content: `*皺眉* 抱歉，出了點問題：${action.message}` }]
+        });
+        break;
+    }
+  }
+}
+
+// 處理 Claude 事件（使用 claudeEventHandler.ts 的統一邏輯）
 function handleClaudeEvent(event: ClaudeEvent) {
   console.log('Claude event:', event.event_type, event);
 
-  // Debug: 特別追蹤權限相關事件
-  if (event.event_type === 'PermissionDenied') {
-    console.log('🔴 PermissionDenied received:', {
-      tool_name: event.tool_name,
-      tool_id: event.tool_id,
-      editMode: editMode.value,
-      currentPendingPermission: pendingPermission.value
-    });
+  // 特殊處理 AskUserQuestion 工具
+  if (event.event_type === 'ToolUse' && event.tool_name === 'AskUserQuestion') {
+    console.log('🤔 AskUserQuestion detected:', event.input);
+
+    // 從 input 中提取 questions
+    const input = event.input as { questions?: Question[] } | undefined;
+    if (input?.questions && Array.isArray(input.questions)) {
+      pendingQuestion.value = {
+        toolId: event.tool_id || '',
+        questions: input.questions,
+      };
+      avatarState.value = 'waiting';
+      busyStatus.value = '等待回答...';
+      stopBusyTextAnimation();
+    }
   }
 
-  switch (event.event_type) {
-    case 'Init':
-      // 初始化完成
-      if (event.session_id) {
-        sessionId.value = event.session_id;
-      }
-      if (event.model) {
-        currentModel.value = event.model;
-      }
-      busyStatus.value = 'Thinking...';
-      break;
+  // 取得當前狀態並處理事件
+  const state = getCurrentAppState();
+  const result = processClaudeEvent(event, state);
 
-    case 'Text':
-      // 收到文字串流
-      if (event.text) {
-        streamingText.value += event.text;
-        // 取得或建立 assistant 訊息
-        const assistantMsg = getOrCreateAssistantMessage();
-
-        // 找到最後一個文字項目，或創建新的
-        const lastItem = assistantMsg.items[assistantMsg.items.length - 1];
-        if (lastItem && lastItem.type === 'text') {
-          // 更新現有的文字項目
-          lastItem.content = streamingText.value;
-        } else {
-          // 在工具後面添加新的文字項目
-          assistantMsg.items.push({ type: 'text', content: streamingText.value });
-        }
-        scrollToBottom();
-      }
-      break;
-
-    case 'ToolUse':
-      // 工具使用（不需要權限確認的工具）
-      if (event.tool_name && event.tool_id) {
-        busyStatus.value = `Using ${event.tool_name}...`;
-        addToolUse(event.tool_name, event.tool_id, event.input || {});
-      }
-      break;
-
-    case 'PermissionDenied':
-      // 權限被拒絕（由 Claude CLI 的 default 權限模式回報）
-      // 在 'ask' 模式下顯示確認對話框
-      console.log('🔴 PermissionDenied conditions:', {
-        has_tool_name: !!event.tool_name,
-        has_tool_id: !!event.tool_id,
-        editMode: editMode.value,
-        will_show_dialog: !!(event.tool_name && event.tool_id && editMode.value === 'ask')
-      });
-
-      if (event.tool_name && event.tool_id && editMode.value === 'ask') {
-        // 先加入工具使用記錄（顯示為待確認狀態）
-        addToolUse(event.tool_name, event.tool_id, event.input || {});
-
-        // 累積這次請求中被拒絕的工具（用於 "yes-all" 時一次加入白名單）
-        deniedToolsThisRequest.value.add(event.tool_name);
-        console.log('🔴 Accumulated denied tools:', [...deniedToolsThisRequest.value]);
-
-        // 只有當還沒有待確認的對話框時才顯示（避免覆蓋）
-        if (!pendingPermission.value) {
-          pendingPermission.value = {
-            toolName: event.tool_name,
-            toolId: event.tool_id,
-            input: event.input || {}
-          };
-
-          console.log('🔴 Setting pendingPermission:', pendingPermission.value);
-
-          // 切換到等待狀態
-          avatarState.value = 'waiting';
-          stopBusyTextAnimation();
-          busyStatus.value = '等待確認...';
-        }
-      } else {
-        console.log('🔴 PermissionDenied ignored due to conditions not met');
-      }
-      break;
-
-    case 'Connected':
-      // Claude CLI 已連線
-      busyStatus.value = 'Connected';
-      break;
-
-    case 'ToolResult':
-      // 工具結果
-      if (event.tool_id) {
-        // 更新 currentToolUses
-        const tool = currentToolUses.value.find(t => t.id === event.tool_id);
-        if (tool) {
-          tool.result = event.result;
-          if (event.is_error) {
-            tool.isCancelled = true;
-          }
-        }
-
-        // 同時更新 assistant 訊息中的工具（在 items 陣列中查找）
-        const lastMsg = messages.value[messages.value.length - 1];
-        if (lastMsg && lastMsg.role === 'assistant') {
-          const toolItem = lastMsg.items.find(
-            (item): item is { type: 'tool'; tool: ToolUseItem } =>
-              item.type === 'tool' && item.tool.id === event.tool_id
-          );
-          if (toolItem) {
-            toolItem.tool.result = event.result;
-            if (event.is_error) {
-              toolItem.tool.isCancelled = true;
-            }
-          }
-        }
-      }
-      break;
-
-    case 'Complete':
-      // 完成
-      isLoading.value = false;
-      stopBusyTextAnimation();
-      avatarState.value = 'complete';
-      streamingText.value = '';
-      // 注意：不清空 currentToolUses，讓工具結果保留在對話框內
-      // 會在下一次 sendMessageCore 開始時清空
-
-      // 更新 context 使用量資訊
-      if (event.context_window_used_percent !== undefined) {
-        contextUsage.value = Math.round(event.context_window_used_percent);
-        console.log('📊 Context usage updated:', contextUsage.value + '%');
-      }
-      if (event.total_tokens_in_conversation !== undefined || event.context_window_max !== undefined) {
-        contextInfo.value = {
-          totalTokens: event.total_tokens_in_conversation,
-          maxTokens: event.context_window_max,
-        };
-        console.log('📊 Context info:', contextInfo.value);
-      }
-
-      // 3 秒後回到待機表情
-      setTimeout(() => {
-        avatarState.value = 'idle';
-      }, 3000);
-      break;
-
-    case 'Error':
-      // 錯誤
-      isLoading.value = false;
-      stopBusyTextAnimation();
-      avatarState.value = 'idle';
-      if (event.message) {
-        messages.value.push({
-          role: 'assistant',
-          items: [{ type: 'text', content: `*皺眉* 抱歉，出了點問題：${event.message}` }]
-        });
-      }
-      break;
-  }
+  // 應用結果
+  applyEventResult(result);
 }
 
 // 設定事件監聽
@@ -559,10 +440,22 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   const isMac = navigator.userAgent.includes('Mac');
   const ctrlOrCmd = isMac ? e.metaKey : e.ctrlKey;
 
-  // Ctrl/Cmd + N: 開始新對話
-  if (ctrlOrCmd && e.key === 'n') {
+  // Ctrl/Cmd + N: 新增標籤頁
+  if (ctrlOrCmd && !e.shiftKey && e.key === 'n') {
     e.preventDefault();
-    startNewConversation();
+    // 先保存當前標籤頁狀態
+    saveCurrentTabState();
+    // 建立新標籤頁
+    tabManager.createTab();
+    // 恢復新標籤頁狀態（空的新對話）
+    restoreTabState();
+    return;
+  }
+
+  // Ctrl/Cmd + Shift + N: 當前標籤頁開始新對話
+  if (ctrlOrCmd && e.shiftKey && e.key === 'N') {
+    e.preventDefault();
+    handleNewConversation();
     return;
   }
 
@@ -583,10 +476,6 @@ function handleGlobalKeydown(e: KeyboardEvent) {
       showSlashMenu.value = false;
       return;
     }
-    if (showHistoryMenu.value) {
-      showHistoryMenu.value = false;
-      return;
-    }
     if (isLoading.value) {
       e.preventDefault();
       interruptRequest();
@@ -602,9 +491,39 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   }
 }
 
-// 開始新對話
-function startNewConversation() {
-  // 清除對話（與 /clear 相同）
+// === SessionSelector 事件處理器 ===
+
+// 切換標籤頁
+function handleSwitchTab(tabId: string) {
+  // 先保存當前標籤頁的狀態
+  saveCurrentTabState();
+
+  // 切換到新標籤頁
+  tabManager.switchTab(tabId);
+
+  // 恢復新標籤頁的狀態
+  restoreTabState();
+}
+
+// 關閉標籤頁
+function handleCloseTab(tabId: string) {
+  // 如果關閉的是當前標籤頁，先保存狀態
+  if (tabId === tabManager.activeTabId.value) {
+    // tabManager.closeTab 會自動切換到其他標籤頁
+    tabManager.closeTab(tabId);
+    // 恢復新的活躍標籤頁狀態
+    restoreTabState();
+  } else {
+    // 關閉其他標籤頁，不需要切換狀態
+    tabManager.closeTab(tabId);
+  }
+}
+
+// 開始新對話（清除當前標籤頁）
+function handleNewConversation() {
+  tabManager.clearCurrentTab();
+
+  // 同步到 App.vue 狀態
   messages.value = [
     {
       role: 'assistant',
@@ -612,13 +531,168 @@ function startNewConversation() {
     }
   ];
   sessionId.value = null;
+  streamingText.value = '';
+  currentToolUses.value = [];
+  deniedToolsThisRequest.value.clear();
   contextUsage.value = null;
   contextInfo.value = null;
+  lastPrompt.value = '';
+  isLoading.value = false;
+  pendingPermission.value = null;
+  avatarState.value = 'idle';
 
   // 聚焦到輸入框
   const textarea = document.querySelector('textarea');
   if (textarea) {
     textarea.focus();
+  }
+}
+
+// 歷史訊息類型（對應 Rust 端的 HistoryMessage）
+// 注意：Rust 使用 #[serde(rename = "type")]，所以 JSON 中的字段名是 "type" 不是 "tool_type"
+interface HistoryMessage {
+  role: string;
+  items: Array<
+    | { type: 'text'; content: string }
+    | { type: 'tool'; tool: { id: string; name: string; type: string; input: unknown; result?: string } }
+  >;
+}
+
+// 從歷史對話開啟
+async function handleOpenHistory(sessionId_: string, summary: string | null) {
+  // 先保存當前標籤頁狀態
+  saveCurrentTabState();
+
+  // 在新標籤頁中開啟歷史對話
+  const newTab = tabManager.openFromHistory(sessionId_, summary);
+
+  // 設定 App.vue 狀態
+  sessionId.value = sessionId_;
+  streamingText.value = '';
+  currentToolUses.value = [];
+  deniedToolsThisRequest.value.clear();
+  contextUsage.value = null;
+  contextInfo.value = null;
+
+  // 嘗試載入歷史訊息
+  try {
+    if (workingDir.value) {
+      const historyMessages = await invoke<HistoryMessage[]>('load_session_history', {
+        workingDir: workingDir.value,
+        sessionId: sessionId_,
+      });
+
+      if (historyMessages && historyMessages.length > 0) {
+        // 將歷史訊息轉換為 App.vue 的 Message 格式
+        messages.value = historyMessages.map(msg => ({
+          role: msg.role as 'user' | 'assistant',
+          items: msg.items.map(item => {
+            if (item.type === 'text') {
+              return { type: 'text' as const, content: item.content };
+            } else {
+              return {
+                type: 'tool' as const,
+                tool: {
+                  id: item.tool.id,
+                  type: item.tool.type,
+                  name: item.tool.name,
+                  input: item.tool.input as Record<string, unknown>,
+                  result: item.tool.result,
+                }
+              };
+            }
+          })
+        }));
+      } else {
+        // 沒有歷史訊息，顯示預設訊息
+        messages.value = [...newTab.messages];
+      }
+    } else {
+      messages.value = [...newTab.messages];
+    }
+  } catch (error) {
+    console.error('Failed to load session history:', error);
+    // 載入失敗，使用預設訊息
+    messages.value = [...newTab.messages];
+  }
+
+  await scrollToBottom();
+}
+
+// 保存當前標籤頁狀態到 tabManager
+function saveCurrentTabState() {
+  const tab = tabManager.activeTab.value;
+  if (!tab) return;
+
+  tab.sessionId = sessionId.value;
+  tab.messages = [...messages.value];
+  tab.streamingText = streamingText.value;
+  tab.currentToolUses = [...currentToolUses.value];
+  tab.deniedToolsThisRequest = new Set(deniedToolsThisRequest.value);
+  tab.contextUsage = contextUsage.value;
+  tab.contextInfo = contextInfo.value;
+  tab.lastPrompt = lastPrompt.value;
+  tab.isLoading = isLoading.value;
+  tab.pendingPermission = pendingPermission.value;
+  tab.avatarState = avatarState.value;
+}
+
+// 從 tabManager 恢復標籤頁狀態
+function restoreTabState() {
+  const tab = tabManager.activeTab.value;
+  if (!tab) return;
+
+  sessionId.value = tab.sessionId;
+  messages.value = [...tab.messages];
+  streamingText.value = tab.streamingText;
+  currentToolUses.value = [...tab.currentToolUses];
+  deniedToolsThisRequest.value = new Set(tab.deniedToolsThisRequest);
+  contextUsage.value = tab.contextUsage;
+  contextInfo.value = tab.contextInfo;
+  lastPrompt.value = tab.lastPrompt;
+  isLoading.value = tab.isLoading;
+  pendingPermission.value = tab.pendingPermission;
+  avatarState.value = tab.avatarState;
+
+  // 滾動到底部
+  scrollToBottom();
+}
+
+// 載入標籤頁的歷史訊息（如果有 sessionId 的話）
+async function loadTabHistory(tabSessionId: string) {
+  if (!workingDir.value || !tabSessionId) return;
+
+  try {
+    const historyMessages = await invoke<HistoryMessage[]>('load_session_history', {
+      workingDir: workingDir.value,
+      sessionId: tabSessionId,
+    });
+
+    if (historyMessages && historyMessages.length > 0) {
+      // 將歷史訊息轉換為 App.vue 的 Message 格式
+      messages.value = historyMessages.map(msg => ({
+        role: msg.role as 'user' | 'assistant',
+        items: msg.items.map(item => {
+          if (item.type === 'text') {
+            return { type: 'text' as const, content: item.content };
+          } else {
+            return {
+              type: 'tool' as const,
+              tool: {
+                id: item.tool.id,
+                type: item.tool.type,
+                name: item.tool.name,
+                input: item.tool.input as Record<string, unknown>,
+                result: item.tool.result,
+              }
+            };
+          }
+        })
+      }));
+      await scrollToBottom();
+    }
+  } catch (error) {
+    console.error('Failed to load tab history:', error);
   }
 }
 
@@ -634,6 +708,19 @@ onMounted(async () => {
     const dir = await invoke<string>('get_working_directory');
     workingDir.value = dir;
     console.log('📁 Working directory:', dir);
+
+    // 初始化 Tab Manager
+    await tabManager.initialize(dir);
+
+    // 恢復當前標籤頁的狀態
+    restoreTabState();
+
+    // 如果當前標籤頁有 sessionId，載入歷史訊息
+    const activeTab = tabManager.activeTab.value;
+    if (activeTab?.sessionId) {
+      sessionId.value = activeTab.sessionId;
+      await loadTabHistory(activeTab.sessionId);
+    }
   } catch (error) {
     console.error('Failed to get working directory:', error);
   }
@@ -670,14 +757,9 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
     ...extraAllowedTools
   ];
 
-  // 根據編輯模式決定 permissionMode
-  let permissionMode: string | null = null;
-  if (editMode.value === 'auto') {
-    permissionMode = 'bypassPermissions';
-  } else if (editMode.value === 'plan') {
-    permissionMode = 'plan';
-  }
-  // 'ask' 模式使用 default，不傳參數
+  // 根據編輯模式決定 permissionMode（變數名稱直接對應 Claude CLI）
+  // 'default' 模式不傳參數（Claude CLI 預設行為）
+  const permissionMode = editMode.value === 'default' ? null : editMode.value;
 
   try {
     // 呼叫 Rust 端送出訊息給 Claude CLI
@@ -686,7 +768,8 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
       workingDir: null,  // 使用預設目錄
       allowedTools: allAllowedTools.length > 0 ? allAllowedTools : null,
       permissionMode: permissionMode,
-      extendedThinking: extendedThinking.value || null
+      extendedThinking: extendedThinking.value || null,
+      resumeSessionId: sessionId.value || null,  // 傳遞當前 session ID 以恢復對話
     });
   } catch (error) {
     console.error('Failed to send to Claude:', error);
@@ -717,6 +800,11 @@ async function sendMessage() {
   });
   userInput.value = '';
   await scrollToBottom();
+
+  // 自動生成標籤頁標題（根據第一則用戶訊息）
+  if (tabManager.activeTabId.value) {
+    tabManager.autoGenerateTitle(tabManager.activeTabId.value);
+  }
 
   await sendMessageCore(content);
 }
@@ -953,57 +1041,6 @@ function insertIdeContextReference() {
   console.log('📎 插入 IDE context 參考:', reference);
 }
 
-// 歷史對話：切換選單顯示
-async function toggleHistoryMenu() {
-  showSlashMenu.value = false; // 關閉斜線選單
-  showHistoryMenu.value = !showHistoryMenu.value;
-
-  if (showHistoryMenu.value) {
-    await loadHistorySessions();
-  }
-}
-
-// 歷史對話：恢復指定 session
-async function resumeSession(session: SessionItem) {
-  showHistoryMenu.value = false;
-
-  // 設定要恢復的 session ID
-  sessionId.value = session.session_id;
-
-  // 清除當前對話，準備恢復
-  messages.value = [
-    {
-      role: 'assistant',
-      items: [{ type: 'text', content: `*翻閱之前的筆記* 嗯，讓我看看我們上次聊到哪裡...` }]
-    }
-  ];
-  contextUsage.value = null;
-  contextInfo.value = null;
-
-  // 發送一個簡單的繼續訊息來恢復對話
-  await scrollToBottom();
-  lastPrompt.value = '/continue';
-  await sendMessageCore('/continue');
-}
-
-// 歷史對話：格式化時間顯示
-function formatSessionTime(isoString: string): string {
-  const date = new Date(isoString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffDays === 0) {
-    return 'Today ' + date.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
-  } else if (diffDays === 1) {
-    return 'Yesterday';
-  } else if (diffDays < 7) {
-    return `${diffDays} days ago`;
-  } else {
-    return date.toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' });
-  }
-}
-
 // 執行斜線命令
 async function executeSlashCommand(command: string) {
   showSlashMenu.value = false;
@@ -1053,11 +1090,24 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
   // 清除待確認的權限
   pendingPermission.value = null;
 
+  // 預備重新執行：創建新的 assistant 訊息，避免覆蓋之前的回應
+  function prepareForRetry() {
+    // 清空 streamingText
+    streamingText.value = '';
+    // 創建新的空 assistant 訊息，這樣 handleTextEvent 會在新訊息中追加
+    // 而不是覆蓋之前的回應
+    messages.value.push({
+      role: 'assistant',
+      items: []
+    });
+  }
+
   switch (response) {
     case 'yes':
       // 單次允許：用 --allowedTools 重新執行同一個請求
       if (lastPrompt.value) {
         console.log(`Re-executing with allowedTools: ${toolName}`);
+        prepareForRetry();
         await sendMessageCore(lastPrompt.value, [toolName]);
       }
       break;
@@ -1070,6 +1120,7 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
       }
       console.log(`Added all denied tools to session whitelist:`, [...sessionAllowedTools.value]);
       if (lastPrompt.value) {
+        prepareForRetry();
         await sendMessageCore(lastPrompt.value);
       }
       break;
@@ -1099,18 +1150,22 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
         }
       }
       if (lastPrompt.value) {
+        prepareForRetry();
         await sendMessageCore(lastPrompt.value);
       }
       break;
 
     case 'no':
-      // 拒絕：更新工具使用記錄，不重新執行
+      // 拒絕：更新工具使用記錄，並通知 Claude 提供替代方案
       {
-        // 更新 currentToolUses
+        // 取得工具資訊用於生成提示訊息
         const tool = currentToolUses.value.find(t => t.id === toolId);
+        const toolTarget = tool?.input?.file_path || tool?.input?.path || tool?.input?.description || '';
+
+        // 更新 currentToolUses
         if (tool) {
           tool.isCancelled = true;
-          tool.userResponse = 'Denied by user';
+          tool.userResponse = 'Permission denied by user';
         }
         // 同時更新 assistant 訊息中的工具（在 items 陣列中查找）
         const lastMsg = messages.value[messages.value.length - 1];
@@ -1121,11 +1176,23 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
           );
           if (toolItem) {
             toolItem.tool.isCancelled = true;
-            toolItem.tool.userResponse = 'Denied by user';
+            toolItem.tool.userResponse = 'Permission denied by user';
           }
         }
+
+        // 發送拒絕訊息給 Claude，讓它提供替代方案
+        const denyMessage = `我拒絕了 ${toolName} 工具對 "${toolTarget}" 的操作權限。請告訴我如何手動完成這個操作，或是提供其他不需要這個權限的替代方案。`;
+
+        messages.value.push({
+          role: 'user',
+          items: [{ type: 'text', content: denyMessage }]
+        });
+        await scrollToBottom();
+
+        // 發送訊息給 Claude
+        lastPrompt.value = denyMessage;
+        await sendMessageCore(denyMessage);
       }
-      avatarState.value = 'idle';
       break;
 
     case 'custom':
@@ -1162,12 +1229,99 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
   }
 }
 
+// 處理 AskUserQuestion 的回應
+async function handleQuestionSubmit(answers: Record<string, string>) {
+  console.log('🟢 Question answers:', answers);
+
+  if (!pendingQuestion.value) return;
+
+  const toolId = pendingQuestion.value.toolId;
+  const formattedAnswer = Object.entries(answers)
+    .map(([q, a]) => `${q}: ${a}`)
+    .join('\n');
+
+  // 更新工具使用記錄
+  const tool = currentToolUses.value.find(t => t.id === toolId);
+  if (tool) {
+    tool.result = formattedAnswer;
+    tool.userAnswered = true;  // 標記用戶已回答，防止 ToolResult 覆蓋
+  }
+
+  // 同時更新 messages 中的工具（遍歷所有訊息尋找）
+  for (const msg of messages.value) {
+    if (msg.role === 'assistant') {
+      const toolItem = msg.items.find(
+        (item): item is { type: 'tool'; tool: ToolUseItem } =>
+          item.type === 'tool' && item.tool.id === toolId
+      );
+      if (toolItem) {
+        toolItem.tool.result = formattedAnswer;
+        toolItem.tool.userAnswered = true;
+        break;
+      }
+    }
+  }
+
+  // 清除待回答的問題
+  pendingQuestion.value = null;
+
+  // 將答案作為使用者訊息發送（讓 Claude 繼續）
+  const answerText = Object.entries(answers)
+    .map(([q, a]) => `${q}\n→ ${a}`)
+    .join('\n\n');
+
+  // 發送答案
+  messages.value.push({
+    role: 'user',
+    items: [{ type: 'text', content: answerText }]
+  });
+  await scrollToBottom();
+  lastPrompt.value = answerText;
+  await sendMessageCore(answerText);
+}
+
+// 取消 AskUserQuestion
+function handleQuestionCancel() {
+  console.log('🔴 Question cancelled');
+
+  if (!pendingQuestion.value) return;
+
+  const toolId = pendingQuestion.value.toolId;
+
+  // 更新工具使用記錄為取消
+  const tool = currentToolUses.value.find(t => t.id === toolId);
+  if (tool) {
+    tool.isCancelled = true;
+    tool.userResponse = 'Cancelled by user';
+  }
+
+  // 同時更新 messages 中的工具
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant') {
+    const toolItem = lastMsg.items.find(
+      (item): item is { type: 'tool'; tool: ToolUseItem } =>
+        item.type === 'tool' && item.tool.id === toolId
+    );
+    if (toolItem) {
+      toolItem.tool.isCancelled = true;
+      toolItem.tool.userResponse = 'Cancelled by user';
+    }
+  }
+
+  // 清除待回答的問題
+  pendingQuestion.value = null;
+  avatarState.value = 'idle';
+  isLoading.value = false;
+  stopBusyTextAnimation();
+}
+
 // 中斷請求
 async function interruptRequest() {
   console.log('Interrupt request');
 
-  // 清除待確認的權限
+  // 清除待確認的權限和問題
   pendingPermission.value = null;
+  pendingQuestion.value = null;
 
   // 呼叫 Rust 端中斷 Claude
   try {
@@ -1190,6 +1344,17 @@ async function interruptRequest() {
     <header class="app-header">
       <h1>Tsunu Alive</h1>
       <span class="subtitle">阿宇陪你寫程式</span>
+      <SessionSelector
+        :tabs="tabManager.tabs.value"
+        :activeTabId="tabManager.activeTabId.value"
+        :historySessions="historySessions"
+        :historyLoading="historyLoading"
+        @switch-tab="handleSwitchTab"
+        @close-tab="handleCloseTab"
+        @new-conversation="handleNewConversation"
+        @open-history="handleOpenHistory"
+        @load-history="loadHistorySessions"
+      />
     </header>
 
     <!-- 主要內容區 -->
@@ -1208,11 +1373,29 @@ async function interruptRequest() {
               <!-- 工具項目 -->
               <div v-if="item.type === 'tool'" class="tool-item">
                 <ToolIndicator
-                  :type="item.tool.type as any"
+                  :type="item.tool.type"
                   :path="(item.tool.input?.file_path as string) || (item.tool.input?.path as string)"
                   :description="item.tool.input?.description as string"
                   :input="item.tool.input?.command as string"
                   :output="item.tool.result"
+                  :query="(item.tool.input?.query as string) || (item.tool.input?.url as string)"
+                  :pattern="item.tool.input?.pattern as string"
+                  :prompt="item.tool.input?.prompt as string"
+                  :todos="item.tool.input?.todos as any"
+                  :questions="item.tool.input?.questions as any"
+                  :notebookPath="item.tool.input?.notebook_path as string"
+                  :cellId="item.tool.input?.cell_id as string"
+                  :newSource="item.tool.input?.new_source as string"
+                  :cellType="item.tool.input?.cell_type as string"
+                  :editMode="item.tool.input?.edit_mode as string"
+                  :shellId="item.tool.input?.shell_id as string"
+                  :skill="item.tool.input?.skill as string"
+                  :args="item.tool.input?.args as string"
+                  :taskId="item.tool.input?.task_id as string"
+                  :content="item.tool.input?.content as string"
+                  :oldCode="item.tool.input?.old_string as string"
+                  :newCode="item.tool.input?.new_string as string"
+                  :rawInput="item.tool.input as Record<string, unknown>"
                   :isRunning="!item.tool.result && !item.tool.isCancelled"
                   :isCancelled="item.tool.isCancelled"
                   :userResponse="item.tool.userResponse"
@@ -1222,9 +1405,21 @@ async function interruptRequest() {
               <!-- 文字項目 -->
               <div
                 v-else-if="item.type === 'text' && item.content"
-                class="message-content markdown-body"
-                v-html="renderMarkdown(item.content)"
-              ></div>
+                class="text-item-wrapper"
+              >
+                <div
+                  class="message-content markdown-body"
+                  v-html="renderMarkdown(item.content)"
+                ></div>
+                <button
+                  class="copy-btn"
+                  :class="{ copied: copiedIndex === `${msgIndex}-${itemIndex}` }"
+                  @click="copyToClipboard(item.content, `${msgIndex}-${itemIndex}`)"
+                  :title="copiedIndex === `${msgIndex}-${itemIndex}` ? '已複製！' : '複製原始文字'"
+                >
+                  {{ copiedIndex === `${msgIndex}-${itemIndex}` ? '✓' : '📋' }}
+                </button>
+              </div>
             </template>
           </div>
 
@@ -1238,8 +1433,16 @@ async function interruptRequest() {
             @respond="handlePermissionResponse"
           />
 
+          <!-- AskUserQuestion 對話框 -->
+          <AskUserQuestionDialog
+            v-if="pendingQuestion"
+            :questions="pendingQuestion.questions"
+            @submit="handleQuestionSubmit"
+            @cancel="handleQuestionCancel"
+          />
+
           <!-- 載入中指示器 -->
-          <div v-if="isLoading && !pendingPermission" class="message assistant loading">
+          <div v-if="isLoading && !pendingPermission && !pendingQuestion" class="message assistant loading">
             <div class="message-content">
               <span class="typing-indicator">
                 <span></span>
@@ -1305,7 +1508,7 @@ async function interruptRequest() {
         <!-- 左側按鈕 -->
         <div class="status-left">
           <button class="status-btn edit-mode" @click="cycleEditMode" :title="editModeLabels[editMode]">
-            <span class="mode-icon">▶</span>
+            <span class="mode-icon">{{ editModeIcons[editMode] }}</span>
             <span class="mode-label">{{ editModeLabels[editMode] }}</span>
           </button>
           <button class="status-btn working-dir" :title="workingDir || '未知'">
@@ -1320,15 +1523,7 @@ async function interruptRequest() {
           >
             <span class="thinking-icon">💭</span>
             <span class="thinking-label">{{ extendedThinking ? 'Thinking ON' : 'Thinking' }}</span>
-          </button>
-          <button
-            class="status-btn context-usage"
-            :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
-            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}` : 'Context usage'"
-          >
-            <span class="usage-icon">◐</span>
-            <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
-          </button>
+          </button>          
           <button
             class="status-btn ide-status"
             :class="{
@@ -1347,17 +1542,20 @@ async function interruptRequest() {
               title="點擊插入檔案參考"
             >{{ ideContextDisplay }}</span>
           </button>
+          <button class="status-btn context-usage" v-if="contextUsage"
+            :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
+            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}` : 'Context usage'">
+            <span class="usage-icon">{{ contextUsageIcon }}</span>
+            <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
+          </button>
         </div>
 
         <!-- 右側按鈕 -->
         <div class="status-right">
-          <button class="status-btn history-btn" @click="toggleHistoryMenu" title="對話歷史">
-            <span class="history-icon">🕐</span>
-          </button>
           <button class="status-btn attach-btn" title="Attach files">
             <span class="attach-icon">📎</span>
           </button>
-          <button class="status-btn slash-btn" @click="showSlashMenu = !showSlashMenu; showHistoryMenu = false" title="Commands">
+          <button class="status-btn slash-btn" @click="showSlashMenu = !showSlashMenu" title="Commands">
             <span class="slash-icon">/</span>
           </button>
           <button
@@ -1414,30 +1612,6 @@ async function interruptRequest() {
         </div>
       </div>
 
-      <!-- 歷史對話選單 -->
-      <div v-if="showHistoryMenu" class="history-menu">
-        <div class="history-header">
-          <span class="history-title">🕐 對話歷史</span>
-          <button class="history-close" @click="showHistoryMenu = false">✕</button>
-        </div>
-        <div v-if="historyLoading" class="history-loading">
-          載入中...
-        </div>
-        <div v-else-if="historySessions.length === 0" class="history-empty">
-          還沒有對話歷史
-        </div>
-        <div v-else class="history-list">
-          <div
-            v-for="session in historySessions"
-            :key="session.session_id"
-            class="history-item"
-            @click="resumeSession(session)"
-          >
-            <div class="history-item-time">{{ formatSessionTime(session.last_modified) }}</div>
-            <div class="history-item-summary">{{ session.summary || '(無摘要)' }}</div>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
 </template>
@@ -1567,6 +1741,50 @@ body {
 .markdown-body a:hover {
   color: var(--primary-color);
 }
+
+/* Table 樣式 */
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 0.9em;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.markdown-body thead {
+  background-color: rgba(74, 144, 217, 0.2);
+}
+
+.markdown-body th {
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--primary-light);
+  border-bottom: 2px solid var(--primary-color);
+}
+
+.markdown-body td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.markdown-body tbody tr {
+  transition: background-color 0.15s;
+}
+
+.markdown-body tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.markdown-body tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* 交替行底色 */
+.markdown-body tbody tr:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.02);
+}
 </style>
 
 <style scoped>
@@ -1597,6 +1815,10 @@ body {
 .subtitle {
   font-size: 0.85rem;
   color: var(--text-muted);
+}
+
+.header-spacer {
+  flex: 1;
 }
 
 /* 主要內容區：左右分割 */
@@ -1695,6 +1917,45 @@ body {
     transform: translateY(-8px);
     opacity: 1;
   }
+}
+
+/* 文字項目包裝（用於複製按鈕） */
+.text-item-wrapper {
+  position: relative;
+}
+
+.text-item-wrapper:hover .copy-btn {
+  opacity: 1;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background-color: rgba(0, 0, 0, 0.4);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.copy-btn:hover {
+  background-color: rgba(0, 0, 0, 0.6);
+  color: var(--text-color);
+}
+
+.copy-btn.copied {
+  opacity: 1;
+  background-color: rgba(46, 204, 113, 0.3);
+  color: #2ecc71;
 }
 
 /* 輸入區域 */
@@ -1913,10 +2174,6 @@ textarea:disabled {
 .context-usage.danger {
   color: #e74c3c;
   font-weight: 600;
-}
-
-.context-usage.danger .usage-icon {
-  animation: pulse-danger 0.8s infinite;
 }
 
 @keyframes pulse-warning {

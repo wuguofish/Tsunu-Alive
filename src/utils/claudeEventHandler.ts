@@ -38,6 +38,7 @@ export interface ToolUseItem {
   result?: string;
   isCancelled?: boolean;
   userResponse?: string;
+  userAnswered?: boolean;  // 標記用戶已回答（AskUserQuestion）
 }
 
 // 對話項目（文字或工具，按時間順序）
@@ -55,7 +56,7 @@ export interface Message {
 export type AvatarState = 'idle' | 'processing' | 'complete' | 'waiting';
 
 // 編輯模式
-export type EditMode = 'ask' | 'auto' | 'reject';
+export type EditMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 
 // Context 詳細資訊
 export interface ContextInfo {
@@ -200,6 +201,7 @@ export function handleToolUseEvent(
       busyStatus: `Using ${event.tool_name}...`,
       messages,
       currentToolUses,
+      streamingText: '', // 清空累積的文字，讓工具後的文字從新開始
     },
     actions: [],
   };
@@ -207,12 +209,13 @@ export function handleToolUseEvent(
 
 /**
  * 處理 PermissionDenied 事件
+ * 注意：無論是 default/acceptEdits/bypassPermissions/plan 模式，收到 PermissionDenied 都表示需要用戶確認
  */
 export function handlePermissionDeniedEvent(
   event: ClaudeEvent,
   state: AppState
 ): EventHandlerResult {
-  if (!event.tool_name || !event.tool_id || state.editMode !== 'ask') {
+  if (!event.tool_name || !event.tool_id) {
     return { stateUpdates: {}, actions: [] };
   }
 
@@ -255,11 +258,13 @@ export function handlePermissionDeniedEvent(
     messages,
     currentToolUses,
     deniedToolsThisRequest,
+    streamingText: '', // 清空累積的文字，讓工具後的文字從新開始
   };
 
   const actions: EventAction[] = [];
 
   // 只有當還沒有待確認的對話框時才設定
+  // 信任 Claude CLI 的事件系統：收到 PermissionDenied 就表示需要用戶確認
   if (!state.pendingPermission) {
     stateUpdates.pendingPermission = {
       toolName: event.tool_name,
@@ -291,7 +296,10 @@ export function handleToolResultEvent(
   // 更新 currentToolUses
   const tool = currentToolUses.find(t => t.id === event.tool_id);
   if (tool) {
-    tool.result = event.result;
+    // 如果用戶已經回答過這個工具（AskUserQuestion），保留用戶的回答
+    if (!tool.userAnswered) {
+      tool.result = event.result;
+    }
     if (event.is_error) {
       tool.isCancelled = true;
     }
@@ -305,7 +313,10 @@ export function handleToolResultEvent(
         item.type === 'tool' && item.tool.id === event.tool_id
     );
     if (toolItem) {
-      toolItem.tool.result = event.result;
+      // 如果用戶已經回答過這個工具（AskUserQuestion），保留用戶的回答
+      if (!toolItem.tool.userAnswered) {
+        toolItem.tool.result = event.result;
+      }
       if (event.is_error) {
         toolItem.tool.isCancelled = true;
       }

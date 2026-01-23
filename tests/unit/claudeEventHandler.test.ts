@@ -11,7 +11,6 @@ import {
   handleClaudeEvent,
   type AppState,
   type ClaudeEvent,
-  type ContextInfo,
 } from '../../src/utils/claudeEventHandler'
 
 // 建立預設的測試狀態
@@ -27,7 +26,7 @@ function createDefaultState(): AppState {
     avatarState: 'idle',
     busyStatus: '',
     isLoading: false,
-    editMode: 'ask',
+    editMode: 'default',
     contextUsage: null,
     contextInfo: null,
   }
@@ -250,7 +249,7 @@ describe('claudeEventHandler', () => {
   describe('handlePermissionDeniedEvent', () => {
     it('sets pendingPermission when editMode is ask', () => {
       const state = createDefaultState()
-      state.editMode = 'ask'
+      state.editMode = 'default'
 
       const event: ClaudeEvent = {
         event_type: 'PermissionDenied',
@@ -272,7 +271,7 @@ describe('claudeEventHandler', () => {
 
     it('adds tool to deniedToolsThisRequest', () => {
       const state = createDefaultState()
-      state.editMode = 'ask'
+      state.editMode = 'default'
 
       const event: ClaudeEvent = {
         event_type: 'PermissionDenied',
@@ -287,7 +286,7 @@ describe('claudeEventHandler', () => {
 
     it('does not overwrite existing pendingPermission', () => {
       const state = createDefaultState()
-      state.editMode = 'ask'
+      state.editMode = 'default'
       state.pendingPermission = {
         toolName: 'Edit',
         toolId: 'existing-tool',
@@ -306,24 +305,53 @@ describe('claudeEventHandler', () => {
       expect(result.stateUpdates.pendingPermission).toBeUndefined()
     })
 
-    it('does nothing when editMode is not ask', () => {
+    it('sets pendingPermission when editMode is acceptEdits', () => {
+      // acceptEdits 模式下仍然會顯示權限對話框（針對 Bash 等工具）
       const state = createDefaultState()
-      state.editMode = 'auto'
+      state.editMode = 'acceptEdits'
 
       const event: ClaudeEvent = {
         event_type: 'PermissionDenied',
         tool_name: 'Edit',
         tool_id: 'tool-123',
+        input: { file_path: '/test.txt' },
       }
 
       const result = handlePermissionDeniedEvent(event, state)
 
-      expect(result.stateUpdates).toEqual({})
+      expect(result.stateUpdates.pendingPermission).toEqual({
+        toolName: 'Edit',
+        toolId: 'tool-123',
+        input: { file_path: '/test.txt' },
+      })
+    })
+
+    it('sets pendingPermission in plan mode (trusts Claude CLI event system)', () => {
+      // 信任 Claude CLI：收到 PermissionDenied 就表示需要用戶確認
+      // 在 plan 模式下，Claude CLI 只會對需要確認的工具發送 PermissionDenied
+      const state = createDefaultState()
+      state.editMode = 'plan'
+
+      const event: ClaudeEvent = {
+        event_type: 'PermissionDenied',
+        tool_name: 'ExitPlanMode',
+        tool_id: 'tool-exit-plan',
+        input: { plan: 'My implementation plan...' },
+      }
+
+      const result = handlePermissionDeniedEvent(event, state)
+
+      // 應該顯示確認對話框
+      expect(result.stateUpdates.pendingPermission).toEqual({
+        toolName: 'ExitPlanMode',
+        toolId: 'tool-exit-plan',
+        input: { plan: 'My implementation plan...' },
+      })
     })
 
     it('triggers stopBusyTextAnimation when setting pendingPermission', () => {
       const state = createDefaultState()
-      state.editMode = 'ask'
+      state.editMode = 'default'
 
       const event: ClaudeEvent = {
         event_type: 'PermissionDenied',
@@ -334,6 +362,22 @@ describe('claudeEventHandler', () => {
       const result = handlePermissionDeniedEvent(event, state)
 
       expect(result.actions).toContainEqual({ type: 'stopBusyTextAnimation' })
+    })
+
+    it('clears streamingText to prevent text duplication after permission dialog', () => {
+      const state = createDefaultState()
+      state.editMode = 'default'
+      state.streamingText = '之前累積的文字'
+
+      const event: ClaudeEvent = {
+        event_type: 'PermissionDenied',
+        tool_name: 'Bash',
+        tool_id: 'tool-456',
+      }
+
+      const result = handlePermissionDeniedEvent(event, state)
+
+      expect(result.stateUpdates.streamingText).toBe('')
     })
   })
 
@@ -394,6 +438,99 @@ describe('claudeEventHandler', () => {
       const result = handleToolResultEvent(event, state)
 
       expect(result.stateUpdates).toEqual({})
+    })
+
+    it('preserves user answer when userAnswered is true (AskUserQuestion)', () => {
+      // 模擬用戶已回答 AskUserQuestion 的情境
+      const userAnswer = 'Question 1: User answer here'
+      const state = createDefaultState()
+      state.currentToolUses = [
+        {
+          id: 'tool-ask-123',
+          type: 'AskUserQuestion',
+          name: 'AskUserQuestion',
+          input: { questions: [] },
+          result: userAnswer,
+          userAnswered: true,  // 用戶已回答
+        },
+      ]
+      state.messages = [
+        {
+          role: 'assistant',
+          items: [
+            {
+              type: 'tool',
+              tool: {
+                id: 'tool-ask-123',
+                type: 'AskUserQuestion',
+                name: 'AskUserQuestion',
+                input: { questions: [] },
+                result: userAnswer,
+                userAnswered: true,
+              },
+            },
+          ],
+        },
+      ]
+
+      // Claude CLI 返回的 ToolResult（應該被忽略）
+      const event: ClaudeEvent = {
+        event_type: 'ToolResult',
+        tool_id: 'tool-ask-123',
+        result: 'Answer questions?',  // 這是 Claude CLI 的預設回應，應該被忽略
+      }
+
+      const result = handleToolResultEvent(event, state)
+
+      // 用戶的答案應該保留，不被覆蓋
+      expect(result.stateUpdates.currentToolUses![0].result).toBe(userAnswer)
+
+      // messages 中的工具也應該保留用戶答案
+      const toolItem = result.stateUpdates.messages![0].items[0]
+      if (toolItem.type === 'tool') {
+        expect(toolItem.tool.result).toBe(userAnswer)
+      }
+    })
+
+    it('updates result normally when userAnswered is false', () => {
+      const state = createDefaultState()
+      state.currentToolUses = [
+        {
+          id: 'tool-123',
+          type: 'Read',
+          name: 'Read',
+          input: {},
+          userAnswered: false,  // 沒有用戶回答
+        },
+      ]
+      state.messages = [
+        {
+          role: 'assistant',
+          items: [
+            {
+              type: 'tool',
+              tool: {
+                id: 'tool-123',
+                type: 'Read',
+                name: 'Read',
+                input: {},
+                userAnswered: false,
+              },
+            },
+          ],
+        },
+      ]
+
+      const event: ClaudeEvent = {
+        event_type: 'ToolResult',
+        tool_id: 'tool-123',
+        result: 'File content',
+      }
+
+      const result = handleToolResultEvent(event, state)
+
+      // 結果應該被正常更新
+      expect(result.stateUpdates.currentToolUses![0].result).toBe('File content')
     })
   })
 
