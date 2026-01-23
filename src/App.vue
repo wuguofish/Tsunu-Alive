@@ -910,6 +910,49 @@ const ideContextDisplay = computed(() => {
   return fileName;
 });
 
+// 插入 IDE context 參考到輸入框
+function insertIdeContextReference() {
+  const ctx = ideStatus.value?.current_context;
+  if (!ctx?.file_path) return;
+
+  // 生成 @file#L1-10 格式的參考
+  let reference = `@${ctx.file_path}`;
+  if (ctx.selection) {
+    const startLine = ctx.selection.start_line + 1;
+    const endLine = ctx.selection.end_line + 1;
+    if (startLine === endLine) {
+      reference += `#L${startLine}`;
+    } else {
+      reference += `#L${startLine}-${endLine}`;
+    }
+  }
+
+  // 插入到輸入框（在游標位置或末尾）
+  const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null;
+  if (textarea) {
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const before = userInput.value.substring(0, start);
+    const after = userInput.value.substring(end);
+
+    // 確保前後有空格
+    const needSpaceBefore = before.length > 0 && !before.endsWith(' ') && !before.endsWith('\n');
+    const needSpaceAfter = after.length > 0 && !after.startsWith(' ') && !after.startsWith('\n');
+
+    userInput.value = before + (needSpaceBefore ? ' ' : '') + reference + (needSpaceAfter ? ' ' : '') + after;
+
+    // 聚焦並移動游標到插入點後
+    textarea.focus();
+    const newPosition = start + (needSpaceBefore ? 1 : 0) + reference.length + (needSpaceAfter ? 1 : 0);
+    textarea.setSelectionRange(newPosition, newPosition);
+  } else {
+    // 沒有 textarea，直接附加到末尾
+    userInput.value = (userInput.value ? userInput.value + ' ' : '') + reference + ' ';
+  }
+
+  console.log('📎 插入 IDE context 參考:', reference);
+}
+
 // 歷史對話：切換選單顯示
 async function toggleHistoryMenu() {
   showSlashMenu.value = false; // 關閉斜線選單
@@ -1297,7 +1340,12 @@ async function interruptRequest() {
           >
             <span class="ide-icon">🔗</span>
             <span class="ide-text">{{ ideConnectionText }}</span>
-            <span v-if="ideContextDisplay" class="ide-context">{{ ideContextDisplay }}</span>
+            <span
+              v-if="ideContextDisplay"
+              class="ide-context clickable"
+              @click.stop="insertIdeContextReference"
+              title="點擊插入檔案參考"
+            >{{ ideContextDisplay }}</span>
           </button>
         </div>
 
@@ -1914,6 +1962,16 @@ textarea:disabled {
   padding: 1px 6px;
   border-radius: 3px;
   margin-left: 4px;
+}
+
+.ide-context.clickable {
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ide-context.clickable:hover {
+  background-color: rgba(46, 204, 113, 0.4);
+  transform: scale(1.05);
 }
 
 @keyframes ide-connected {

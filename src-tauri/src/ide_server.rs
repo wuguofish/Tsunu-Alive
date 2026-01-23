@@ -496,4 +496,113 @@ mod tests {
         assert!(json.contains("file.rs"));
         assert!(json.contains("rust"));
     }
+
+    #[test]
+    fn test_json_rpc_response_success() {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            result: Some(serde_json::json!({ "status": "ok" })),
+            error: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"result\""));
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn test_json_rpc_response_error() {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32700,
+                message: "Parse error".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"error\""));
+        assert!(json.contains("-32700"));
+        assert!(!json.contains("\"result\""));
+    }
+
+    #[test]
+    fn test_ide_server_status_serialization() {
+        let status = IdeServerStatus {
+            running: true,
+            port: 19750,
+            connected_clients: vec![
+                ConnectedClient {
+                    id: "127.0.0.1:12345".to_string(),
+                    name: "VS Code".to_string(),
+                    connected_at: "2026-01-23T12:00:00Z".to_string(),
+                },
+            ],
+            current_context: None,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"running\":true"));
+        assert!(json.contains("19750"));
+        assert!(json.contains("VS Code"));
+    }
+
+    #[test]
+    fn test_diagnostic_serialization() {
+        let diag = Diagnostic {
+            severity: "error".to_string(),
+            message: "undefined variable".to_string(),
+            range: SelectionRange {
+                start_line: 5,
+                start_character: 10,
+                end_line: 5,
+                end_character: 15,
+            },
+        };
+        let json = serde_json::to_string(&diag).unwrap();
+        assert!(json.contains("\"severity\":\"error\""));
+        assert!(json.contains("undefined variable"));
+    }
+
+    #[test]
+    fn test_ide_context_with_diagnostics() {
+        let ctx = IdeContext {
+            file_path: Some("/src/main.rs".to_string()),
+            selected_text: None,
+            selection: None,
+            file_content: None,
+            language_id: Some("rust".to_string()),
+            diagnostics: vec![
+                Diagnostic {
+                    severity: "warning".to_string(),
+                    message: "unused variable".to_string(),
+                    range: SelectionRange::default(),
+                },
+            ],
+            last_updated: Some("2026-01-23T12:00:00Z".to_string()),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(json.contains("warning"));
+        assert!(json.contains("unused variable"));
+    }
+
+    #[test]
+    fn test_json_rpc_request_without_params() {
+        let json = r#"{"jsonrpc":"2.0","id":2,"method":"context/clear"}"#;
+        let request: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.method, "context/clear");
+        assert!(request.params.is_none());
+    }
+
+    #[test]
+    fn test_connected_client_serialization() {
+        let client = ConnectedClient {
+            id: "client-123".to_string(),
+            name: "PyCharm".to_string(),
+            connected_at: "2026-01-23T10:30:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&client).unwrap();
+        assert!(json.contains("PyCharm"));
+        assert!(json.contains("client-123"));
+    }
 }

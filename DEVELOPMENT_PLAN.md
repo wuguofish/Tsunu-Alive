@@ -163,7 +163,7 @@
 - [ ] **終端輸出參考** - `@terminal:name` 參考終端輸出
 - [ ] **多對話管理** - 新標籤、新視窗開啟對話
 
-### Phase 4.7：IDE 整合（`/ide` 功能）🔄 進行中
+### Phase 4.7：IDE 整合（`/ide` 功能）✅ 完成
 
 - [x] **WebSocket Server** ✅
   - Tauri 後端啟動 WebSocket server（預設 port: 19750）
@@ -173,14 +173,15 @@
   - JSON-RPC 格式訊息
   - 支援的 method：`context/update`、`context/clear`、`selection/changed`
   - 資料結構：檔案路徑、選取範圍、診斷資訊
-- [ ] **VS Code 插件（MVP）**
+- [x] **VS Code 插件（MVP）** ✅
   - 監聽編輯器選取變化
   - 發送 context 到 Tsunu Alive
-  - 顯示連接狀態
-- [ ] **UI 顯示**
-  - IDE 連接狀態指示器
-  - 目前接收的 context（檔案名稱、選取行數）
-  - 快速插入 `@file#L1-10` 參考
+  - 顯示連接狀態（狀態列圖示）
+- [x] **UI 顯示** ✅
+  - IDE 連接狀態指示器（🔗 綠色/橘色/灰色）
+  - 目前接收的 context（檔案名稱:行數）
+- [x] **快速插入參考** ✅
+  - 點擊 IDE context 插入 `@file#L1-10` 參考到輸入框
 
 **技術架構：**
 
@@ -231,16 +232,17 @@ VS Code Extension ──WebSocket──▶ Tsunu Alive (WS Server)
 
 ### 測試框架設定
 
-- [x] **前端測試 (Vitest + Vue Test Utils)** - 64 tests
+- [x] **前端測試 (Vitest + Vue Test Utils)** - 82 tests
   - 設定 Vitest 測試環境
   - PermissionDialog 元件測試 - 14 tests
   - ToolIndicator 元件測試 - 19 tests
   - claudeEventHandler 邏輯測試 - 29 tests（含 context 相關）
+  - ideUtils 工具函數測試 - 18 tests（IDE 整合相關）
   - sanity 測試 - 2 tests
-- [x] **後端測試 (Rust)** - 16 tests
+- [x] **後端測試 (Rust)** - 23 tests
   - `parse_claude_output` 事件解析測試 - 10 tests（含 context 相關）
   - `add_project_permission_core` 設定檔讀寫測試 - 4 tests
-  - `ide_server` JSON-RPC 解析與 context 序列化測試 - 3 tests
+  - `ide_server` JSON-RPC 解析與 context 序列化測試 - 9 tests
   - 權限解析邏輯（蛇底式/駝峰式欄位相容）
 
 ### 優先測試項目
@@ -248,14 +250,15 @@ VS Code Extension ──WebSocket──▶ Tsunu Alive (WS Server)
 1. ✅ **權限確認流程** - PermissionDialog + claudeEventHandler 測試完成
 2. ✅ **Claude CLI 事件解析** - parse_claude_output + claudeEventHandler 測試完成
 3. ✅ **設定檔讀寫** - add_project_permission_core 測試完成
+4. ✅ **IDE 整合** - ideUtils + ide_server 測試完成
 
 ### 測試統計
 
 | 類別 | 測試數量 |
 | ------ | ---------- |
-| 前端 (Vitest) | 64 |
-| 後端 (Rust) | 13 |
-| **總計** | **77** |
+| 前端 (Vitest) | 82 |
+| 後端 (Rust) | 23 |
+| **總計** | **105** |
 
 ### CI 整合（可選）
 
