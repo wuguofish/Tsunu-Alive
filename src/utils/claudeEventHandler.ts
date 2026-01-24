@@ -3,6 +3,17 @@
  * 提取自 App.vue，用於測試和重用
  */
 
+import { isAutoAllowTool } from '../constants/autoAllowTools';
+
+// structuredPatch 的 hunk 類型（Edit 工具的差異資訊）
+export interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];  // 每行開頭：' '=未變更, '-'=刪除, '+'=新增
+}
+
 // Claude CLI 事件類型
 export interface ClaudeEvent {
   event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied';
@@ -20,6 +31,8 @@ export interface ClaudeEvent {
   total_tokens_in_conversation?: number;
   context_window_max?: number;
   context_window_used_percent?: number;
+  // Edit 工具的結構化差異（ToolResult 事件）
+  structured_patch?: DiffHunk[];
 }
 
 // 待確認的權限請求
@@ -27,6 +40,9 @@ export interface PendingPermission {
   toolName: string;
   toolId: string;
   input: Record<string, unknown>;
+  isFromHook?: boolean;  // 是否來自 PermissionRequest Hook（新機制）
+  sessionId?: string;    // Session ID（用於 Hook 模式的白名單管理）
+  originalPrompt?: string;  // 觸發這個權限請求的原始 prompt（用於 fallback 模式重新執行）
 }
 
 // 工具使用項目
@@ -39,6 +55,7 @@ export interface ToolUseItem {
   isCancelled?: boolean;
   userResponse?: string;
   userAnswered?: boolean;  // 標記用戶已回答（AskUserQuestion）
+  structuredPatch?: DiffHunk[];  // Edit 工具的結構化差異
 }
 
 // 對話項目（文字或工具，按時間順序）
@@ -80,6 +97,8 @@ export interface AppState {
   // Context 相關
   contextUsage: number | null;
   contextInfo: ContextInfo | null;
+  // 最後一次用戶主動發起的請求（用於 fallback 模式重新執行）
+  lastPrompt: string;
 }
 
 // 事件處理結果
@@ -207,6 +226,9 @@ export function handleToolUseEvent(
   };
 }
 
+// AUTO_ALLOW_TOOLS 已移至 src/constants/autoAllowTools.ts
+// 這是單一真相來源，避免重複定義導致不同步
+
 /**
  * 處理 PermissionDenied 事件
  * 注意：無論是 default/acceptEdits/bypassPermissions/plan 模式，收到 PermissionDenied 都表示需要用戶確認
@@ -217,6 +239,19 @@ export function handlePermissionDeniedEvent(
 ): EventHandlerResult {
   if (!event.tool_name || !event.tool_id) {
     return { stateUpdates: {}, actions: [] };
+  }
+
+  // 檢查是否是不需要確認的工具（使用共用常數）
+  if (isAutoAllowTool(event.tool_name)) {
+    console.log(`🔓 Auto-allowing tool (legacy mode): ${event.tool_name}`);
+    // 自動把工具加入 deniedToolsThisRequest，這樣下次重新執行時會被允許
+    // 不設定 pendingPermission，不會顯示對話框
+    const deniedToolsThisRequest = new Set(state.deniedToolsThisRequest);
+    deniedToolsThisRequest.add(event.tool_name);
+    return {
+      stateUpdates: { deniedToolsThisRequest },
+      actions: [],
+    };
   }
 
   const messages = [...state.messages];
@@ -270,6 +305,8 @@ export function handlePermissionDeniedEvent(
       toolName: event.tool_name,
       toolId: event.tool_id,
       input: event.input || {},
+      // 保存原始 prompt，用於 fallback 模式重新執行
+      originalPrompt: state.lastPrompt,
     };
     stateUpdates.avatarState = 'waiting';
     stateUpdates.busyStatus = '等待確認...';
@@ -303,6 +340,10 @@ export function handleToolResultEvent(
     if (event.is_error) {
       tool.isCancelled = true;
     }
+    // 儲存 Edit 工具的結構化差異
+    if (event.structured_patch) {
+      tool.structuredPatch = event.structured_patch;
+    }
   }
 
   // 更新 messages 中的工具
@@ -319,6 +360,10 @@ export function handleToolResultEvent(
       }
       if (event.is_error) {
         toolItem.tool.isCancelled = true;
+      }
+      // 儲存 Edit 工具的結構化差異
+      if (event.structured_patch) {
+        toolItem.tool.structuredPatch = event.structured_patch;
       }
     }
   }

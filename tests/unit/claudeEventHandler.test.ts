@@ -29,6 +29,7 @@ function createDefaultState(): AppState {
     editMode: 'default',
     contextUsage: null,
     contextInfo: null,
+    lastPrompt: '',
   }
 }
 
@@ -378,6 +379,201 @@ describe('claudeEventHandler', () => {
       const result = handlePermissionDeniedEvent(event, state)
 
       expect(result.stateUpdates.streamingText).toBe('')
+    })
+
+    // AUTO_ALLOW_TOOLS 相關測試
+    describe('auto-allow tools (legacy fallback mode)', () => {
+      it('auto-allows AskUserQuestion without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'AskUserQuestion',
+          tool_id: 'tool-ask-123',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        // 不應該設定 pendingPermission（不顯示對話框）
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        // 應該加入 deniedToolsThisRequest（用於重新執行時允許）
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('AskUserQuestion')).toBe(true)
+      })
+
+      it('auto-allows Read tool without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'Read',
+          tool_id: 'tool-read-123',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('Read')).toBe(true)
+      })
+
+      it('auto-allows Glob tool without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'Glob',
+          tool_id: 'tool-glob-123',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('Glob')).toBe(true)
+      })
+
+      it('auto-allows Grep tool without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'Grep',
+          tool_id: 'tool-grep-123',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('Grep')).toBe(true)
+      })
+
+      it('auto-allows Task tool without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'Task',
+          tool_id: 'tool-task-123',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('Task')).toBe(true)
+      })
+
+      it('auto-allows TodoRead and TodoWrite without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const readEvent: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'TodoRead',
+          tool_id: 'tool-todo-read',
+        }
+
+        const writeEvent: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'TodoWrite',
+          tool_id: 'tool-todo-write',
+        }
+
+        const readResult = handlePermissionDeniedEvent(readEvent, state)
+        expect(readResult.stateUpdates.pendingPermission).toBeUndefined()
+        expect(readResult.stateUpdates.deniedToolsThisRequest?.has('TodoRead')).toBe(true)
+
+        // 重置 state
+        const state2 = createDefaultState()
+        const writeResult = handlePermissionDeniedEvent(writeEvent, state2)
+        expect(writeResult.stateUpdates.pendingPermission).toBeUndefined()
+        expect(writeResult.stateUpdates.deniedToolsThisRequest?.has('TodoWrite')).toBe(true)
+      })
+
+      it('auto-allows WebSearch and WebFetch without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const searchEvent: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'WebSearch',
+          tool_id: 'tool-websearch',
+        }
+
+        const result = handlePermissionDeniedEvent(searchEvent, state)
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('WebSearch')).toBe(true)
+
+        const state2 = createDefaultState()
+        const fetchEvent: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'WebFetch',
+          tool_id: 'tool-webfetch',
+        }
+
+        const result2 = handlePermissionDeniedEvent(fetchEvent, state2)
+        expect(result2.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result2.stateUpdates.deniedToolsThisRequest?.has('WebFetch')).toBe(true)
+      })
+
+      it('auto-allows EnterPlanMode without showing permission dialog', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'EnterPlanMode',
+          tool_id: 'tool-enter-plan',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('EnterPlanMode')).toBe(true)
+      })
+
+      it('still shows permission dialog for Edit tool (not auto-allowed)', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'Edit',
+          tool_id: 'tool-edit-123',
+          input: { file_path: '/test.txt' },
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        // Edit 不在 AUTO_ALLOW 列表中，應該顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Edit')
+      })
+
+      it('still shows permission dialog for Bash tool (not auto-allowed)', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'Bash',
+          tool_id: 'tool-bash-123',
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Bash')
+      })
+
+      it('still shows permission dialog for ExitPlanMode (requires user confirmation)', () => {
+        const state = createDefaultState()
+
+        const event: ClaudeEvent = {
+          event_type: 'PermissionDenied',
+          tool_name: 'ExitPlanMode',
+          tool_id: 'tool-exit-plan',
+          input: { plan: 'Implementation plan...' },
+        }
+
+        const result = handlePermissionDeniedEvent(event, state)
+
+        // ExitPlanMode 需要用戶確認計畫，不應該自動允許
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('ExitPlanMode')
+      })
     })
   })
 

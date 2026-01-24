@@ -37,6 +37,9 @@ pub enum ClaudeEvent {
         tool_id: String,
         result: String,
         is_error: bool,
+        // Edit 工具的結構化差異（VS Code 風格 Diff View 用）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        structured_patch: Option<serde_json::Value>,
     },
     // 完成
     Complete {
@@ -292,7 +295,6 @@ pub async fn run_claude(
     if let Some(tools) = &allowed_tools {
         if !tools.is_empty() {
             let tools_arg = tools.join(",");
-            eprintln!("🔧 Adding --allowedTools: {}", tools_arg);
             cmd.arg("--allowedTools").arg(&tools_arg);
         }
     }
@@ -304,7 +306,6 @@ pub async fn run_claude(
 
     // 如果啟用 extended thinking
     if extended_thinking.unwrap_or(false) {
-        eprintln!("🧠 Extended thinking enabled");
         cmd.arg("--thinking");
     }
 
@@ -507,7 +508,10 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                         .to_string()
                 };
 
-                events.push(ClaudeEvent::ToolResult { tool_id, result, is_error });
+                // 提取 Edit 工具的 structuredPatch（用於 VS Code 風格 Diff View）
+                let structured_patch = tool_result.get("structuredPatch").cloned();
+
+                events.push(ClaudeEvent::ToolResult { tool_id, result, is_error, structured_patch });
             }
         }
         "result" => {
@@ -533,7 +537,7 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
             let context_window_used_percent = json.get("context_window_used_percent")
                 .or_else(|| json.get("contextWindowUsedPercent"))
                 .and_then(|v| v.as_f64());
-
+            
             // Debug: 印出完整的 result JSON 來檢查結構
             eprintln!("🔍 Result JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
             // 額外印出完整 JSON 以便 debug

@@ -149,6 +149,74 @@ Claude CLI 支援 hooks 在特定事件觸發自訂腳本。
 
 **參考資料**：[Claude Code Hooks 官方文檔](https://docs.claude.com/en/docs/claude-code/hooks)
 
+### ⚠️ Hooks 機制限制（2026-01-24 調查結論）
+
+經過實際測試和調查，發現 Claude CLI Hooks 在不同環境下有重大限制：
+
+#### Hook 可用性總表
+
+| Hook 類型 | 互動式終端 | Headless/JSON 模式 | 備註 |
+|-----------|-----------|-------------------|------|
+| `SessionStart` | ✅ | ⚠️ 需測試 | |
+| `SessionEnd` | ✅ | ⚠️ 需測試 | |
+| `UserPromptSubmit` | ✅ | ✅ **已驗證** | 2026-01-24 實測通過 |
+| `PreToolUse` | ❌ **Bug** | ❌ **Bug** | [#6305](https://github.com/anthropics/claude-code/issues/6305) |
+| `PostToolUse` | ❌ **Bug** | ❌ **Bug** | [#6305](https://github.com/anthropics/claude-code/issues/6305) |
+| `Stop` | ✅ | ⚠️ 需測試 | |
+| `SubagentStop` | ✅ | ⚠️ 需測試 | |
+| `PermissionRequest` | ✅ | ❌ 不觸發 | [#11891](https://github.com/anthropics/claude-code/issues/11891), [#13203](https://github.com/anthropics/claude-code/issues/13203) |
+
+#### PreToolUse / PostToolUse Bug
+
+根據 [GitHub #6305](https://github.com/anthropics/claude-code/issues/6305)：
+
+> "The trigger mechanism that invokes hooks when tools are used is **completely broken**."
+
+- 多個用戶確認：設定正確但 hooks 從不執行
+- 版本 1.0.38+ 到 1.0.89 都有此問題
+- 影響所有環境（終端機、VS Code、Headless）
+
+#### PermissionRequest Hook 限制
+
+根據官方文檔：
+> "PermissionRequest hook runs when the permission dialog is shown to the user"
+
+**問題**：在使用 `-p` 和 `--output-format stream-json` 時，不會顯示對話框，因此 Hook 不觸發。
+
+**相關 Issues**：
+- [#11891](https://github.com/anthropics/claude-code/issues/11891) - PermissionRequest hook 在 VS Code 擴充功能中不觸發
+- [#13203](https://github.com/anthropics/claude-code/issues/13203) - 確認為功能缺失，非 bug
+- [#16237](https://github.com/anthropics/claude-code/issues/16237) - Feature request（已標記為重複）
+
+**結論**：PermissionRequest Hook 只在**互動式終端模式**下有效。使用 JSON 輸出模式的應用程式必須依賴 fallback 機制（如 Tsunu Alive 的 `--allowedTools` 重新執行）。
+
+#### Tsunu Alive vs Clawdachi 架構比較
+
+| 項目 | Clawdachi | Tsunu Alive |
+|------|-----------|-------------|
+| **平台** | macOS 原生 (Swift) | 跨平台 (Tauri) |
+| **誰執行 Claude CLI** | 用戶自己在終端機執行 | App 自動 spawn 進程 |
+| **整合方式** | 監控 Terminal/iTerm2 | 直接控制 Claude CLI 進程 |
+| **模式** | 互動式終端模式 | Headless + JSON 模式 |
+| **Hooks 可用性** | 較完整 | 受限（見上表） |
+
+Clawdachi 是「旁觀者」— 監控用戶手動執行的 Claude CLI。
+Tsunu Alive 是「控制者」— 自己啟動和管理 Claude CLI 進程。
+
+**參考**：[Clawdachi GitHub](https://github.com/gonzchris/Clawdachi)
+
+#### 對 Tsunu Alive 開發的影響
+
+1. **Phase 4.8 Hooks 整合需重新評估**
+   - PreToolUse/PostToolUse 有 bug，不能用於阿宇表情
+   - PermissionRequest 在我們的模式下不觸發
+   - 改用現有的 JSON stream 事件（ToolUse、ToolResult、Complete）驅動表情
+
+2. **權限處理維持 Fallback 模式**
+   - Permission HTTP Server 和 Hook 腳本已實作，但無法接收請求
+   - 繼續使用 `--allowedTools` 重新執行機制
+   - 追蹤相關 issues，官方支援後再切換
+
 ---
 
 ## Tauri 參考

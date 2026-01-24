@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { ref, nextTick, computed, onMounted, onUnmounted } from "vue";
-import { marked, Renderer } from "marked";
-import hljs from "highlight.js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { readImage } from "@tauri-apps/plugin-clipboard-manager";
 import ToolIndicator from "./components/ToolIndicator.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
+import PlanApprovalDialog from "./components/PlanApprovalDialog.vue";
 import AskUserQuestionDialog from "./components/AskUserQuestionDialog.vue";
 import SessionSelector from "./components/SessionSelector.vue";
+import ImagePreview, { type AttachedImage } from "./components/ImagePreview.vue";
 import { useTabManager } from "./composables/useTabManager";
+import { renderMarkdown } from "./utils/markdown";
 import {
   handleClaudeEvent as processClaudeEvent,
   type ClaudeEvent,
@@ -19,6 +21,7 @@ import {
   type EventAction,
   type EditMode,
   type AvatarState,
+  type DiffHunk,
 } from "./utils/claudeEventHandler";
 
 // Tab Manager
@@ -47,25 +50,8 @@ const deniedToolsThisRequest = ref<Set<string>>(new Set());
 
 // 事件監聯取消函數
 let unlistenClaude: UnlistenFn | null = null;
-
-// 自訂 renderer 來處理程式碼高亮
-const renderer = new Renderer();
-renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
-  const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext';
-  const highlighted = hljs.highlight(text, { language }).value;
-  return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
-};
-
-// 設定 marked
-marked.setOptions({
-  breaks: true, // 支援換行
-});
-marked.use({ renderer });
-
-// 將 Markdown 轉換為 HTML
-function renderMarkdown(content: string): string {
-  return marked.parse(content) as string;
-}
+let unlistenPermissionRequest: UnlistenFn | null = null;
+let unlistenPlanApproval: UnlistenFn | null = null;
 
 // Avatar 圖片對應
 const avatarImages: Record<AvatarState, string> = {
@@ -113,6 +99,10 @@ const mentionFilter = ref('');
 const mentionFiles = ref<FileItem[]>([]);
 const mentionCursorPosition = ref(0);  // @ 符號的位置
 const mentionSelectedIndex = ref(0);   // 選單中選中的項目索引
+
+// 附加的圖片列表
+const attachedImages = ref<AttachedImage[]>([]);
+let imageIdCounter = 0;
 
 // 是否正在等待回應
 const isLoading = ref(false);
@@ -363,6 +353,7 @@ function getCurrentAppState(): AppState {
     editMode: editMode.value,
     contextUsage: contextUsage.value,
     contextInfo: contextInfo.value,
+    lastPrompt: lastPrompt.value,
   };
 }
 
@@ -464,6 +455,20 @@ function handleClaudeEvent(event: ClaudeEvent) {
     }
   }
 
+  // 特殊處理 AskUserQuestion 的 ToolResult (is_error)
+  // 這種情況發生在 Hook 機制自動允許 AskUserQuestion 後，Claude CLI 因為沒有收到用戶輸入而返回錯誤
+  // 注意：我們不應該在這裡清除 pendingQuestion，因為用戶可能還在回答問題
+  // 正確的做法是：讓用戶回答問題，答案會作為 user message 發送
+  // 這裡只記錄日誌，不清除 pendingQuestion
+  if (event.event_type === 'ToolResult' && event.is_error) {
+    const tool = currentToolUses.value.find(t => t.id === event.tool_id);
+    if (tool?.name === 'AskUserQuestion') {
+      console.log('ℹ️ AskUserQuestion ToolResult with error (expected in fallback mode), keeping pendingQuestion for user to answer');
+      // 不清除 pendingQuestion，讓用戶可以繼續回答
+      // 用戶回答後，答案會作為 user message 發送給 Claude
+    }
+  }
+
   // 取得當前狀態並處理事件
   const state = getCurrentAppState();
   const result = processClaudeEvent(event, state);
@@ -472,10 +477,61 @@ function handleClaudeEvent(event: ClaudeEvent) {
   applyEventResult(result);
 }
 
+// Hook 權限請求事件類型
+interface PermissionRequestEvent {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  session_id?: string;
+}
+
+// ExitPlanMode 專用事件類型
+interface PlanApprovalEvent {
+  tool_use_id: string;
+  plan_content?: string;
+  plan_file_path?: string;
+}
+
 // 設定事件監聯
 async function setupEventListeners() {
   unlistenClaude = await listen<ClaudeEvent>('claude-event', (event) => {
     handleClaudeEvent(event.payload);
+  });
+
+  // 監聽 Permission HTTP Server 發送的權限請求（Hook 機制）
+  unlistenPermissionRequest = await listen<PermissionRequestEvent>('permission-request', (event) => {
+    console.log('🔔 Permission request from Hook:', event.payload);
+    const { tool_name, tool_input, tool_use_id, session_id } = event.payload;
+
+    // 設定待確認的權限，標記為來自 Hook
+    pendingPermission.value = {
+      toolName: tool_name,
+      toolId: tool_use_id,
+      input: tool_input,
+      isFromHook: true,
+      sessionId: session_id,
+    };
+    avatarState.value = 'waiting';
+    busyStatus.value = '等待確認...';
+  });
+
+  // 監聯 ExitPlanMode 專用事件
+  unlistenPlanApproval = await listen<PlanApprovalEvent>('plan-approval-request', (event) => {
+    console.log('📋 Plan approval request:', event.payload);
+    const { tool_use_id, plan_content, plan_file_path } = event.payload;
+
+    // 設定待確認的權限（ExitPlanMode），標記為來自 Hook
+    pendingPermission.value = {
+      toolName: 'ExitPlanMode',
+      toolId: tool_use_id,
+      input: {
+        plan: plan_content,
+        _planFilePath: plan_file_path,
+      },
+      isFromHook: true,
+    };
+    avatarState.value = 'waiting';
+    busyStatus.value = '等待確認計畫...';
   });
 }
 
@@ -598,7 +654,7 @@ interface HistoryMessage {
   role: string;
   items: Array<
     | { type: 'text'; content: string }
-    | { type: 'tool'; tool: { id: string; name: string; type: string; input: unknown; result?: string } }
+    | { type: 'tool'; tool: { id: string; name: string; type: string; input: unknown; result?: string; structured_patch?: DiffHunk[]; is_error?: boolean } }
   >;
 }
 
@@ -642,6 +698,10 @@ async function handleOpenHistory(sessionId_: string, summary: string | null) {
                   name: item.tool.name,
                   input: item.tool.input as Record<string, unknown>,
                   result: item.tool.result,
+                  // VS Code 風格 Diff View（歷史訊息）
+                  structuredPatch: item.tool.structured_patch,
+                  // 工具執行是否失敗（歷史訊息）
+                  isCancelled: item.tool.is_error,
                 }
               };
             }
@@ -728,6 +788,10 @@ async function loadTabHistory(tabSessionId: string) {
                 name: item.tool.name,
                 input: item.tool.input as Record<string, unknown>,
                 result: item.tool.result,
+                // VS Code 風格 Diff View（歷史訊息）
+                structuredPatch: item.tool.structured_patch,
+                // 工具執行是否失敗（歷史訊息）
+                isCancelled: item.tool.is_error,
               }
             };
           }
@@ -777,6 +841,12 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unlistenClaude) {
     unlistenClaude();
+  }
+  if (unlistenPermissionRequest) {
+    unlistenPermissionRequest();
+  }
+  if (unlistenPlanApproval) {
+    unlistenPlanApproval();
   }
   stopBusyTextAnimation();
   stopIdeStatusPolling();
@@ -834,15 +904,32 @@ async function sendMessage() {
   const content = userInput.value.trim();
   if (!content || isLoading.value) return;
 
-  // 記住這次的 prompt（用於權限確認後重新執行）
-  lastPrompt.value = content;
+  // 組合最終 prompt：文字 + 圖片路徑
+  let finalContent = content;
+  if (attachedImages.value.length > 0) {
+    // 附加圖片路徑到 prompt
+    const imagePaths = attachedImages.value.map(img => img.path).join(' ');
+    finalContent = `${content} ${imagePaths}`;
+  }
 
-  // 加入使用者訊息
+  // 記住這次的 prompt（用於權限確認後重新執行）
+  lastPrompt.value = finalContent;
+
+  // 加入使用者訊息（顯示用，包含圖片標記）
+  let displayContent = content;
+  if (attachedImages.value.length > 0) {
+    displayContent += `\n📷 附加 ${attachedImages.value.length} 張圖片`;
+  }
   messages.value.push({
     role: 'user',
-    items: [{ type: 'text', content: content }]
+    items: [{ type: 'text', content: displayContent }]
   });
   userInput.value = '';
+
+  // 清除附加圖片（已包含在發送的 prompt 中）
+  // 不需要清理臨時檔案，Claude 還需要讀取它們
+  attachedImages.value = [];
+
   await scrollToBottom();
 
   // 自動生成標籤頁標題（根據第一則用戶訊息）
@@ -850,7 +937,7 @@ async function sendMessage() {
     tabManager.autoGenerateTitle(tabManager.activeTabId.value);
   }
 
-  await sendMessageCore(content);
+  await sendMessageCore(finalContent);
 }
 
 // 按 Enter 送出（Shift+Enter 換行）
@@ -887,6 +974,123 @@ function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
+  }
+}
+
+// 處理剪貼簿貼上（Ctrl+V）
+async function handlePaste(e: ClipboardEvent) {
+  try {
+    // 嘗試從剪貼簿讀取圖片
+    const image = await readImage();
+    if (image) {
+      // 取得圖片資料和尺寸
+      const rgba = await image.rgba();
+      const size = await image.size();
+      const { width, height } = size;
+
+      // 儲存到臨時檔案
+      const filePath = await invoke<string>('save_temp_image', {
+        rgbaData: Array.from(rgba),
+        width,
+        height,
+      });
+
+      // 產生唯一 ID
+      const id = `img_${++imageIdCounter}_${Date.now()}`;
+
+      // 將 RGBA 轉為可顯示的格式（使用 canvas）
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
+        ctx.putImageData(imageData, 0, 0);
+        const previewUrl = canvas.toDataURL('image/png');
+
+        // 加入附加圖片列表
+        attachedImages.value.push({
+          id,
+          path: filePath,
+          name: `截圖_${new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.png`,
+          isTemp: true,
+          previewUrl,
+        });
+
+        console.log('📷 Image pasted:', filePath);
+      }
+
+      // 阻止預設貼上行為（不要把圖片內容貼到輸入框）
+      e.preventDefault();
+    }
+  } catch (err) {
+    // 剪貼簿沒有圖片，讓預設行為處理（貼上文字）
+    console.log('No image in clipboard, allowing default paste');
+  }
+}
+
+// 移除附加的圖片
+async function removeAttachedImage(id: string) {
+  const index = attachedImages.value.findIndex(img => img.id === id);
+  if (index !== -1) {
+    const image = attachedImages.value[index];
+
+    // 如果是臨時檔案，刪除它
+    if (image.isTemp) {
+      try {
+        await invoke('cleanup_temp_image', { filePath: image.path });
+      } catch (err) {
+        console.error('Failed to cleanup temp image:', err);
+      }
+    }
+
+    // 從列表中移除
+    attachedImages.value.splice(index, 1);
+  }
+}
+
+// 處理拖曳進入（防止預設行為）
+function handleDragOver(e: DragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+// 處理拖曳放下
+async function handleDrop(e: DragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+
+  const files = e.dataTransfer?.files;
+  if (!files || files.length === 0) return;
+
+  // 支援的圖片格式
+  const imageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'];
+
+  for (const file of Array.from(files)) {
+    if (imageTypes.includes(file.type)) {
+      // 取得檔案路徑（Tauri 拖曳檔案會提供路徑）
+      // 注意：瀏覽器的 File API 不會直接給路徑，但 Tauri 會
+      const filePath = (file as File & { path?: string }).path;
+
+      if (filePath) {
+        // 產生唯一 ID
+        const id = `img_${++imageIdCounter}_${Date.now()}`;
+
+        // 建立預覽 URL
+        const previewUrl = URL.createObjectURL(file);
+
+        // 加入附加圖片列表
+        attachedImages.value.push({
+          id,
+          path: filePath,
+          name: file.name,
+          isTemp: false,  // 不是臨時檔案，不需要清理
+          previewUrl,
+        });
+
+        console.log('📷 Image dropped:', filePath);
+      }
+    }
   }
 }
 
@@ -1153,7 +1357,9 @@ async function executeSlashCommand(command: string) {
 }
 
 // 處理權限確認回應
-// 使用「後處理」模式：確認後用 --allowedTools 重新執行
+// 支援兩種模式：
+// 1. Hook 模式（isFromHook=true）：直接回應給 Permission Server
+// 2. 後處理模式（isFromHook=false）：用 --allowedTools 重新執行（deprecated fallback）
 async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-always' | 'no' | 'custom', customMessage?: string) {
   console.log('🟢 Permission response:', response, customMessage);
   console.log('🟢 Current state:', {
@@ -1166,9 +1372,81 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
 
   const toolName = pendingPermission.value.toolName;
   const toolId = pendingPermission.value.toolId;
+  const isFromHook = pendingPermission.value.isFromHook ?? false;
+  const hookSessionId = pendingPermission.value.sessionId;
+  const originalPrompt = pendingPermission.value.originalPrompt;
 
   // 清除待確認的權限
   pendingPermission.value = null;
+
+  // ========== Hook 模式（新機制） ==========
+  if (isFromHook) {
+    console.log('🔔 Using Hook mode for permission response');
+
+    // 決定 behavior
+    const isAllow = response === 'yes' || response === 'yes-all' || response === 'yes-always';
+    const behavior = isAllow ? 'allow' : 'deny';
+    const message = response === 'no'
+      ? '使用者拒絕了這個操作'
+      : (response === 'custom' ? customMessage : undefined);
+
+    try {
+      // 發送決策到 Permission Server
+      await invoke('respond_to_permission', {
+        toolUseId: toolId,
+        behavior,
+        message,
+      });
+      console.log(`✅ Permission response sent: ${behavior}`);
+
+      // 處理白名單
+      if (response === 'yes-all' && hookSessionId) {
+        // 將工具加入 Session 白名單（後端）
+        await invoke('add_to_session_whitelist', {
+          sessionId: hookSessionId,
+          toolName,
+        });
+        console.log(`✅ Added ${toolName} to session whitelist`);
+      }
+
+      if (response === 'yes-always' && workingDir.value) {
+        // 寫入專案級白名單
+        await invoke('add_project_permission', {
+          workingDir: workingDir.value,
+          toolName,
+        });
+        console.log(`✅ Added ${toolName} to project permissions`);
+      }
+
+      // 恢復狀態
+      avatarState.value = 'processing';
+      busyStatus.value = isAllow ? '執行中...' : '已拒絕';
+
+    } catch (error) {
+      console.error('❌ Failed to send permission response:', error);
+      // 如果失敗，嘗試使用後處理模式作為 fallback
+      console.log('⚠️ Falling back to legacy mode');
+      await handlePermissionResponseLegacy(response, toolName, toolId, customMessage, originalPrompt);
+    }
+
+    return;
+  }
+
+  // ========== 後處理模式（Fallback） ==========
+  await handlePermissionResponseLegacy(response, toolName, toolId, customMessage, originalPrompt);
+}
+
+// 後處理模式：用 --allowedTools 重新執行（deprecated fallback）
+async function handlePermissionResponseLegacy(
+  response: 'yes' | 'yes-all' | 'yes-always' | 'no' | 'custom',
+  toolName: string,
+  toolId: string,
+  customMessage?: string,
+  originalPrompt?: string
+) {
+  console.log('⚠️ Using legacy post-processing mode');
+  // 使用 originalPrompt（如果有）或 fallback 到 lastPrompt
+  const promptToRerun = originalPrompt || lastPrompt.value;
 
   // 預備重新執行：創建新的 assistant 訊息，避免覆蓋之前的回應
   function prepareForRetry() {
@@ -1185,10 +1463,10 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
   switch (response) {
     case 'yes':
       // 單次允許：用 --allowedTools 重新執行同一個請求
-      if (lastPrompt.value) {
+      if (promptToRerun) {
         console.log(`Re-executing with allowedTools: ${toolName}`);
         prepareForRetry();
-        await sendMessageCore(lastPrompt.value, [toolName]);
+        await sendMessageCore(promptToRerun, [toolName]);
       }
       break;
 
@@ -1199,9 +1477,9 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
         sessionAllowedTools.value.add(deniedTool);
       }
       console.log(`Added all denied tools to session whitelist:`, [...sessionAllowedTools.value]);
-      if (lastPrompt.value) {
+      if (promptToRerun) {
         prepareForRetry();
-        await sendMessageCore(lastPrompt.value);
+        await sendMessageCore(promptToRerun);
       }
       break;
 
@@ -1229,9 +1507,9 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
           }
         }
       }
-      if (lastPrompt.value) {
+      if (promptToRerun) {
         prepareForRetry();
-        await sendMessageCore(lastPrompt.value);
+        await sendMessageCore(promptToRerun);
       }
       break;
 
@@ -1309,6 +1587,90 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
   }
 }
 
+// 處理 ExitPlanMode 計畫審核的回應
+async function handlePlanApprovalResponse(response: 'approve-auto' | 'approve-manual' | 'keep-planning' | 'custom', customMessage?: string) {
+  console.log('📋 Plan approval response:', response, customMessage);
+
+  if (!pendingPermission.value) return;
+
+  const toolId = pendingPermission.value.toolId;
+  const isFromHook = pendingPermission.value.isFromHook ?? false;
+
+  // 清除待確認的權限
+  pendingPermission.value = null;
+
+  // 轉換為 Permission Server 需要的格式
+  let behavior: string;
+  let message: string | undefined;
+
+  // 根據官方 Claude CLI 的 ExitPlanMode 選項對應
+  switch (response) {
+    case 'approve-auto':
+      behavior = 'allow';
+      message = 'Yes, and auto-accept edits';
+      break;
+    case 'approve-manual':
+      behavior = 'allow';
+      message = 'Yes, and manually approve edits';
+      break;
+    case 'keep-planning':
+      behavior = 'deny';
+      message = 'No, keep planning';
+      break;
+    case 'custom':
+      behavior = 'deny';
+      message = customMessage || 'User provided custom instructions';
+      break;
+  }
+
+  const isAllowed = behavior === 'allow';
+
+  if (isFromHook) {
+    try {
+      await invoke('respond_to_permission', {
+        toolUseId: toolId,
+        behavior,
+        message,
+      });
+      console.log(`✅ Plan approval response sent: ${behavior} - ${message}`);
+
+      // 如果選擇了 auto-accept edits，要實際切換到 acceptEdits 模式
+      if (response === 'approve-auto') {
+        editMode.value = 'acceptEdits';
+        console.log('📝 Switched to acceptEdits mode');
+      }
+
+      // 恢復狀態
+      avatarState.value = isAllowed ? 'processing' : 'idle';
+      busyStatus.value = isAllowed ? '執行計畫中...' : '';
+
+    } catch (error) {
+      console.error('❌ Failed to send plan approval response:', error);
+    }
+  } else {
+    // 後處理模式（fallback）
+    // 注意：在 fallback 模式下，Claude CLI 不會自動繼續執行
+    // 我們需要發送一個明確的訊息告訴 Claude 用戶的決定
+    // 直接使用上面 switch 中設定好的 message（一定有值）
+
+    // 如果選擇了 auto-accept edits，要實際切換到 acceptEdits 模式
+    if (response === 'approve-auto') {
+      editMode.value = 'acceptEdits';
+      console.log('📝 Switched to acceptEdits mode');
+    }
+
+    const userMessage = message!;
+
+    messages.value.push({
+      role: 'user',
+      items: [{ type: 'text', content: userMessage }]
+    });
+    await scrollToBottom();
+    lastPrompt.value = userMessage;
+    await sendMessageCore(userMessage);
+  }
+}
+
 // 處理 AskUserQuestion 的回應
 async function handleQuestionSubmit(answers: Record<string, string>) {
   console.log('🟢 Question answers:', answers);
@@ -1356,7 +1718,8 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
     items: [{ type: 'text', content: answerText }]
   });
   await scrollToBottom();
-  lastPrompt.value = answerText;
+  // 注意：不更新 lastPrompt，因為這是對工具的回應，不是新的用戶請求
+  // 這樣在 PermissionDenied fallback 模式下重新執行時，會使用原始的用戶請求
   await sendMessageCore(answerText);
 }
 
@@ -1475,10 +1838,12 @@ async function interruptRequest() {
                   :content="item.tool.input?.content as string"
                   :oldCode="item.tool.input?.old_string as string"
                   :newCode="item.tool.input?.new_string as string"
+                  :structuredPatch="item.tool.structuredPatch"
                   :rawInput="item.tool.input as Record<string, unknown>"
                   :isRunning="!item.tool.result && !item.tool.isCancelled"
                   :isCancelled="item.tool.isCancelled"
                   :userResponse="item.tool.userResponse"
+                  :ideConnected="(ideStatus?.connected_clients?.length ?? 0) > 0"
                 />
               </div>
 
@@ -1503,9 +1868,17 @@ async function interruptRequest() {
             </template>
           </div>
 
-          <!-- 權限確認對話框 -->
+          <!-- ExitPlanMode 專用對話框 -->
+          <PlanApprovalDialog
+            v-if="pendingPermission && pendingPermission.toolName === 'ExitPlanMode'"
+            :plan-content="(pendingPermission.input?.plan as string)"
+            :plan-file-path="(pendingPermission.input?._planFilePath as string)"
+            @respond="handlePlanApprovalResponse"
+          />
+
+          <!-- 一般權限確認對話框 -->
           <PermissionDialog
-            v-if="pendingPermission"
+            v-else-if="pendingPermission"
             :action="pendingPermission.toolName"
             :target="(pendingPermission.input?.file_path as string) || (pendingPermission.input?.path as string) || (pendingPermission.input?.description as string) || ''"
             :summary="(pendingPermission.input?.description as string)"
@@ -1514,8 +1887,9 @@ async function interruptRequest() {
           />
 
           <!-- AskUserQuestion 對話框 -->
+          <!-- 使用 v-else-if 確保與 Permission 對話框互斥顯示 -->
           <AskUserQuestionDialog
-            v-if="pendingQuestion"
+            v-else-if="pendingQuestion"
             :questions="pendingQuestion.questions"
             @submit="handleQuestionSubmit"
             @cancel="handleQuestionCancel"
@@ -1544,11 +1918,21 @@ async function interruptRequest() {
     </div>
 
     <!-- 輸入區域（底部 100% 寬度）-->
-    <div class="input-area">
+    <div class="input-area" @dragover="handleDragOver" @drop="handleDrop">
       <!-- 忙碌狀態指示器 -->
       <div v-if="isLoading" class="busy-indicator">
         <span class="busy-dot"></span>
         <span class="busy-text">{{ busyStatus }}</span>
+      </div>
+
+      <!-- 附加圖片預覽 -->
+      <div v-if="attachedImages.length > 0" class="attached-images">
+        <ImagePreview
+          v-for="image in attachedImages"
+          :key="image.id"
+          :image="image"
+          @remove="removeAttachedImage"
+        />
       </div>
 
       <!-- 輸入框 -->
@@ -1557,7 +1941,8 @@ async function interruptRequest() {
           v-model="userInput"
           @keydown="handleKeydown"
           @input="handleInput"
-          placeholder="Type @ to mention files..."
+          @paste="handlePaste"
+          placeholder="Type @ to mention files... (Ctrl+V 貼上圖片)"
           :disabled="isLoading"
           rows="2"
         ></textarea>
@@ -2091,6 +2476,14 @@ body {
   font-style: italic;
 }
 
+/* 附加圖片預覽區 */
+.attached-images {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 8px 12px 0;
+  gap: 0;
+}
+
 /* 輸入框包裝 */
 .input-wrapper {
   width: 100%;
@@ -2607,4 +3000,6 @@ textarea:disabled {
 .chat-container::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+
 </style>

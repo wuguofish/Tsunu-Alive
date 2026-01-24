@@ -305,6 +305,43 @@ Tsunu Alive App
 - VS Code Claude 擴充：剪貼簿貼上後顯示小縮圖預覽
 - PyCharm：偵測圖片路徑後顯示「偵測到圖片」標示
 
+### Phase 4.10：VS Code 風格 Diff View ✅ 完成
+
+將 Edit 工具的比較介面改成類似 VS Code 的 Diff View，顯示行號和行級變更高亮。
+
+**發現：Claude CLI 已提供 structuredPatch**
+
+在 tool_result 的 `toolUseResult` 中包含 `structuredPatch` 欄位，是標準 unified diff 格式。
+
+**實作完成：**
+
+1. **Rust 端修改** (`claude.rs`)
+   - [x] 在 `ToolResult` 事件中加入 `structured_patch` 欄位
+   - [x] 解析 `toolUseResult.structuredPatch` 並傳遞到前端
+
+2. **前端事件處理** (`claudeEventHandler.ts`)
+   - [x] 擴充 `ClaudeEvent` 類型，加入 `structured_patch`
+   - [x] 擴充 `ToolUseItem` 類型，儲存 patch 資料
+
+3. **ToolIndicator 組件**
+   - [x] 新增 `structuredPatch` prop
+   - [x] VS Code 風格 Diff View 渲染（行號 + 行級變更高亮）
+   - [x] 行號計算（舊/新檔案雙欄行號）
+
+4. **歷史訊息支援**
+   - [x] `HistoryToolUse` 結構體加入 `structured_patch` 欄位
+   - [x] 歷史載入時正確映射到前端
+
+5. **Edit 錯誤顯示**
+   - [x] `HistoryToolUse` 加入 `is_error` 欄位
+   - [x] 前端映射 `is_error` → `isCancelled`
+   - [x] 錯誤訊息優先顯示（過濾 `<tool_use_error>` 標籤）
+   - [x] 橘色警告樣式（區別於成功的綠色/紅色 diff）
+
+**檔案路徑智慧開啟**
+- [x] IDE 連線時：使用 `openPath` 在編輯器中開啟
+- [x] 未連線時：使用 `revealItemInDir` 在檔案總管顯示
+
 ### Phase 5：進階功能（低優先級）
 
 - [ ] **MCP 伺服器支援** - 連接外部工具、資料庫、API

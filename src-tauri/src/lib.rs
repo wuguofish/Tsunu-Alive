@@ -1,5 +1,6 @@
 mod claude;
 mod ide_server;
+mod permission_server;
 
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use serde_json::{json, Value};
 // 全域狀態
 struct AppState {
     claude_process: Arc<Mutex<claude::ClaudeProcess>>,
+    permission_state: permission_server::SharedPermissionState,
 }
 
 #[tauri::command]
@@ -141,6 +143,12 @@ pub struct HistoryToolUse {
     pub tool_type: String,
     pub input: Value,
     pub result: Option<String>,
+    /// Edit 工具的結構化差異（VS Code 風格 Diff View）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_patch: Option<Value>,
+    /// 工具執行是否失敗（對應 Claude CLI 的 is_error 欄位）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
 }
 
 /// 歷史訊息（對應前端的 Message）
@@ -607,11 +615,20 @@ fn load_session_history(
                                     .and_then(|c| c.as_str())
                                     .map(|s| s.to_string());
 
+                                // 提取 is_error 欄位（工具執行失敗時會有這個欄位）
+                                let is_error = content_item.get("is_error")
+                                    .and_then(|e| e.as_bool());
+
                                 // 檢查 toolUseResult.filePath（ExitPlanMode 的計畫檔案路徑）
                                 let plan_file_path = json.get("toolUseResult")
                                     .and_then(|r| r.get("filePath"))
                                     .and_then(|p| p.as_str())
                                     .map(|s| s.to_string());
+
+                                // 提取 Edit 工具的 structuredPatch（VS Code 風格 Diff View）
+                                let structured_patch = json.get("toolUseResult")
+                                    .and_then(|r| r.get("structuredPatch"))
+                                    .cloned();
 
                                 // 在之前的 messages 中找到對應的工具並更新結果
                                 for msg in messages.iter_mut().rev() {
@@ -621,11 +638,19 @@ fn load_session_history(
                                             if let HistoryChatItem::Tool { tool } = item {
                                                 if tool.id == tool_use_id {
                                                     tool.result = result_content.clone();
+                                                    // 設定工具執行錯誤狀態
+                                                    if is_error == Some(true) {
+                                                        tool.is_error = Some(true);
+                                                    }
                                                     // 如果有計畫檔案路徑，加入到 input 中
                                                     if let Some(ref path) = plan_file_path {
                                                         if let Some(input_obj) = tool.input.as_object_mut() {
                                                             input_obj.insert("_planFilePath".to_string(), json!(path));
                                                         }
+                                                    }
+                                                    // 設定 Edit 工具的結構化差異
+                                                    if structured_patch.is_some() {
+                                                        tool.structured_patch = structured_patch.clone();
                                                     }
                                                     found = true;
                                                     break;
@@ -710,6 +735,8 @@ fn load_session_history(
                                         tool_type: tool_name,
                                         input,
                                         result: None,  // 結果會在後續的 user 訊息中填充
+                                        structured_patch: None,  // 會在後續的 user 訊息中填充
+                                        is_error: None,  // 錯誤狀態會在後續的 user 訊息中填充
                                     };
 
                                     assistant_items.push(HistoryChatItem::Tool { tool });
@@ -896,6 +923,63 @@ async fn get_ide_context() -> Result<Option<ide_server::IdeContext>, String> {
 }
 
 // ============================================================================
+// Image Commands
+// ============================================================================
+
+/// 儲存圖片資料到臨時檔案
+/// 接收 RGBA 圖片資料和尺寸，儲存為 PNG 檔案
+#[tauri::command]
+fn save_temp_image(rgba_data: Vec<u8>, width: u32, height: u32) -> Result<String, String> {
+    use std::io::Write;
+
+    // 確保臨時目錄存在
+    let temp_dir = std::env::temp_dir().join("tsunu_alive");
+    if !temp_dir.exists() {
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+    }
+
+    // 產生唯一檔名
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    let filename = format!("clipboard_{}.png", timestamp);
+    let file_path = temp_dir.join(&filename);
+
+    // 將 RGBA 資料編碼為 PNG
+    let file = fs::File::create(&file_path)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+
+    let mut writer = encoder.write_header()
+        .map_err(|e| format!("Failed to write PNG header: {}", e))?;
+    writer.write_image_data(&rgba_data)
+        .map_err(|e| format!("Failed to write PNG data: {}", e))?;
+
+    // 回傳完整路徑
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// 清理臨時圖片檔案
+#[tauri::command]
+fn cleanup_temp_image(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+
+    // 只允許刪除臨時目錄下的檔案
+    let temp_dir = std::env::temp_dir().join("tsunu_alive");
+    if !path.starts_with(&temp_dir) {
+        return Err("Cannot delete file outside temp directory".to_string());
+    }
+
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete temp file: {}", e))?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Plan File Commands
 // ============================================================================
 
@@ -906,6 +990,213 @@ pub struct PlanFileInfo {
     pub name: String,          // 檔案名稱（不含副檔名）
     pub modified_at: String,   // ISO 8601 格式
 }
+
+// ============================================================================
+// Permission Server Commands
+// ============================================================================
+
+/// 回應權限請求（前端呼叫）
+#[tauri::command]
+async fn respond_to_permission(
+    state: State<'_, AppState>,
+    tool_use_id: String,
+    behavior: String,
+    message: Option<String>,
+) -> Result<(), String> {
+    let mut perm_state = state.permission_state.lock().await;
+
+    if let Some(tx) = perm_state.pending.remove(&tool_use_id) {
+        let response = permission_server::PermissionResponse {
+            behavior,
+            message,
+            updated_input: None,
+        };
+
+        tx.send(response).map_err(|_| "Failed to send permission response")?;
+        Ok(())
+    } else {
+        Err(format!("No pending permission request found for {}", tool_use_id))
+    }
+}
+
+/// 將工具加入 session 白名單（前端呼叫）
+#[tauri::command]
+async fn add_to_session_whitelist(
+    state: State<'_, AppState>,
+    session_id: String,
+    tool_name: String,
+) -> Result<(), String> {
+    let mut perm_state = state.permission_state.lock().await;
+    perm_state.add_to_session_whitelist(&session_id, &tool_name);
+    eprintln!("📝 Added {} to session {} whitelist", tool_name, session_id);
+    Ok(())
+}
+
+/// 清除 session 白名單（前端呼叫）
+#[tauri::command]
+async fn clear_session_whitelist(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let mut perm_state = state.permission_state.lock().await;
+    perm_state.clear_session_whitelist(&session_id);
+    eprintln!("🗑️ Cleared session {} whitelist", session_id);
+    Ok(())
+}
+
+// ============================================================================
+// Hook Installation
+// ============================================================================
+
+/// 安裝 PermissionRequest Hook 到 ~/.claude/settings.json
+/// 這讓 Claude CLI 在需要權限確認時呼叫我們的 Hook 腳本
+fn install_permission_hooks() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
+    let settings_path = home.join(".claude").join("settings.json");
+
+    // 確保 .claude 目錄存在
+    let claude_dir = home.join(".claude");
+    if !claude_dir.exists() {
+        fs::create_dir_all(&claude_dir)
+            .map_err(|e| format!("Failed to create .claude directory: {}", e))?;
+    }
+
+    // 讀取現有設定或建立新的
+    let mut settings: Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .map_err(|e| format!("Failed to read settings: {}", e))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+
+    // 確定 Hook 腳本路徑
+    let hook_script = if cfg!(windows) {
+        "powershell.exe -ExecutionPolicy Bypass -File \"$HOME/.claude/hooks/tsunu-permission.ps1\""
+    } else {
+        "$HOME/.claude/hooks/tsunu-permission.sh"
+    };
+
+    // 檢查是否已經有 PermissionRequest hook
+    let hooks = settings.get_mut("hooks")
+        .and_then(|h| h.as_object_mut());
+
+    let needs_install = if let Some(hooks_obj) = hooks {
+        // 檢查 PermissionRequest 是否已存在我們的 hook
+        if let Some(perm_hooks) = hooks_obj.get("PermissionRequest").and_then(|p| p.as_array()) {
+            !perm_hooks.iter().any(|h| {
+                h.get("hooks")
+                    .and_then(|hs| hs.as_array())
+                    .map(|arr| arr.iter().any(|item| {
+                        item.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.contains("tsunu-permission"))
+                            .unwrap_or(false)
+                    }))
+                    .unwrap_or(false)
+            })
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+
+    if needs_install {
+        // 建立 Hook 設定
+        let hook_config = json!({
+            "matcher": "*",  // 匹配所有工具
+            "hooks": [{
+                "type": "command",
+                "command": hook_script,
+                "timeout": 60000  // 60 秒 timeout
+            }]
+        });
+
+        // 確保 hooks 物件存在
+        if settings.get("hooks").is_none() {
+            settings["hooks"] = json!({});
+        }
+
+        // 確保 PermissionRequest 陣列存在
+        if settings["hooks"].get("PermissionRequest").is_none() {
+            settings["hooks"]["PermissionRequest"] = json!([]);
+        }
+
+        // 新增我們的 hook
+        if let Some(arr) = settings["hooks"]["PermissionRequest"].as_array_mut() {
+            arr.push(hook_config);
+        }
+
+        // 寫回設定檔
+        let content = serde_json::to_string_pretty(&settings)
+            .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+        fs::write(&settings_path, content)
+            .map_err(|e| format!("Failed to write settings: {}", e))?;
+
+        eprintln!("📝 Installed PermissionRequest hook to {:?}", settings_path);
+    } else {
+        eprintln!("✅ PermissionRequest hook already installed");
+    }
+
+    // 複製 Hook 腳本到 ~/.claude/hooks/
+    let hooks_dir = home.join(".claude").join("hooks");
+    if !hooks_dir.exists() {
+        fs::create_dir_all(&hooks_dir)
+            .map_err(|e| format!("Failed to create hooks directory: {}", e))?;
+    }
+
+    // 取得執行檔所在目錄（用於找到 resources）
+    // 在開發模式下，資源會在不同的位置
+    let resource_hook = if cfg!(windows) {
+        "tsunu-permission.ps1"
+    } else {
+        "tsunu-permission.sh"
+    };
+
+    // 嘗試從多個可能的位置讀取 Hook 腳本
+    let hook_content = get_hook_script_content(resource_hook);
+
+    if let Some(content) = hook_content {
+        let dest_path = hooks_dir.join(resource_hook);
+        fs::write(&dest_path, &content)
+            .map_err(|e| format!("Failed to write hook script: {}", e))?;
+
+        // 在 Unix 系統上設定執行權限
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest_path)
+                .map_err(|e| format!("Failed to get permissions: {}", e))?
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest_path, perms)
+                .map_err(|e| format!("Failed to set permissions: {}", e))?;
+        }
+
+        eprintln!("📝 Installed hook script to {:?}", dest_path);
+    } else {
+        eprintln!("⚠️ Could not find hook script resource, skipping installation");
+    }
+
+    Ok(())
+}
+
+/// 取得 Hook 腳本內容（內嵌在程式中作為 fallback）
+fn get_hook_script_content(script_name: &str) -> Option<String> {
+    // 內嵌的 Hook 腳本內容（作為 fallback）
+    if script_name == "tsunu-permission.ps1" {
+        Some(include_str!("../../resources/hooks/tsunu-permission.ps1").to_string())
+    } else if script_name == "tsunu-permission.sh" {
+        Some(include_str!("../../resources/hooks/tsunu-permission.sh").to_string())
+    } else {
+        None
+    }
+}
+
+// ============================================================================
+// Plan File Commands
+// ============================================================================
 
 /// 取得最近的計畫檔案路徑
 /// 掃描 ~/.claude/plans/ 目錄，返回最近修改的 .md 檔案
@@ -960,12 +1251,20 @@ fn get_recent_plan_path() -> Result<Option<PlanFileInfo>, String> {
     }
 }
 
+/// Permission HTTP Server 預設埠號
+const PERMISSION_SERVER_PORT: u16 = 19751;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 建立共享的 permission state
+    let permission_state = permission_server::create_shared_state();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState {
             claude_process: Arc::new(Mutex::new(claude::ClaudeProcess::default())),
+            permission_state: permission_state.clone(),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -986,15 +1285,44 @@ pub fn run() {
             start_ide_server,
             get_ide_status,
             get_ide_context,
-            get_recent_plan_path
+            get_recent_plan_path,
+            respond_to_permission,
+            add_to_session_whitelist,
+            clear_session_whitelist,
+            save_temp_image,
+            cleanup_temp_image
         ])
-        .setup(|_app| {
+        .setup(move |app| {
+            // 安裝 PermissionRequest Hook
+            if let Err(e) = install_permission_hooks() {
+                eprintln!("⚠️ Hook 安裝失敗: {}", e);
+            }
+
+            // 設定 AppHandle 到 permission state
+            {
+                let state = permission_state.clone();
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut guard = state.lock().await;
+                    guard.set_app_handle(app_handle);
+                });
+            }
+
             // 啟動 IDE WebSocket Server
             tauri::async_runtime::spawn(async {
                 if let Err(e) = ide_server::start_ide_server().await {
                     eprintln!("⚠️ IDE Server 啟動失敗: {}", e);
                 }
             });
+
+            // 啟動 Permission HTTP Server
+            let perm_state = permission_state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = permission_server::start_server(perm_state, PERMISSION_SERVER_PORT).await {
+                    eprintln!("⚠️ Permission Server 啟動失敗: {}", e);
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

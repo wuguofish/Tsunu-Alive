@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import hljs from 'highlight.js';
-import { marked } from 'marked';
-import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
+import { renderMarkdown } from '../utils/markdown';
 
 // 複製狀態追蹤
 const copiedBlockId = ref<string | null>(null);
@@ -48,14 +48,20 @@ async function copyToClipboard(text: string, blockId: string) {
   }
 }
 
-// 在檔案總管中顯示檔案
+// 智慧開啟檔案：IDE 連線時用編輯器開啟，否則在檔案總管顯示
 async function openFile(filePath: string) {
-  console.log('Revealing file:', filePath);
   try {
-    await revealItemInDir(filePath);
-    console.log('File revealed successfully');
+    if (props.ideConnected) {
+      // IDE 連線中 → 用系統預設編輯器開啟
+      console.log('Opening file in editor:', filePath);
+      await openPath(filePath);
+    } else {
+      // 未連線 → 在檔案總管中顯示
+      console.log('Revealing file in explorer:', filePath);
+      await revealItemInDir(filePath);
+    }
   } catch (err) {
-    console.error('Failed to reveal file:', err);
+    console.error('Failed to open/reveal file:', err);
   }
 }
 
@@ -73,6 +79,15 @@ interface TodoItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
   activeForm?: string;
+}
+
+// Edit 工具的差異 hunk 類型
+interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];  // 每行開頭：' '=未變更, '-'=刪除, '+'=新增
 }
 
 // AskUserQuestion 的問題類型
@@ -134,6 +149,10 @@ const props = defineProps<{
   isRunning?: boolean;
   isCancelled?: boolean;
   userResponse?: string;
+  // IDE 連線狀態
+  ideConnected?: boolean;
+  // Edit 工具的結構化差異（VS Code 風格 Diff View）
+  structuredPatch?: DiffHunk[];
 }>();
 
 // 是否展開
@@ -231,14 +250,64 @@ function guessLanguage(filePath?: string): string {
   return extMap[ext || ''] || 'plaintext';
 }
 
+// 計算 diff hunk 中每行的行號
+interface DiffLineInfo {
+  oldLineNo: number | null;  // 舊檔案行號，null 表示新增行
+  newLineNo: number | null;  // 新檔案行號，null 表示刪除行
+  prefix: string;
+  content: string;
+}
+
+function computeDiffLineNumbers(hunk: DiffHunk): DiffLineInfo[] {
+  const result: DiffLineInfo[] = [];
+  let oldLine = hunk.oldStart;
+  let newLine = hunk.newStart;
+
+  for (const line of hunk.lines) {
+    const prefix = line.charAt(0);
+    const content = line.substring(1);
+
+    if (prefix === ' ') {
+      // 未改變行：兩邊都有行號
+      result.push({ oldLineNo: oldLine, newLineNo: newLine, prefix, content });
+      oldLine++;
+      newLine++;
+    } else if (prefix === '-') {
+      // 刪除行：只有舊行號
+      result.push({ oldLineNo: oldLine, newLineNo: null, prefix, content });
+      oldLine++;
+    } else if (prefix === '+') {
+      // 新增行：只有新行號
+      result.push({ oldLineNo: null, newLineNo: newLine, prefix, content });
+      newLine++;
+    }
+  }
+
+  return result;
+}
+
+// 判斷 Edit 工具是否失敗（來自 Claude CLI 的 is_error 欄位）
+const isEditError = computed(() => {
+  if (props.type !== 'Edit') return false;
+  // 只用 isCancelled 判斷（來自 Claude CLI 的 is_error: true）
+  return props.isCancelled === true;
+});
+
+// 格式化 Edit 錯誤訊息（移除 <tool_use_error> 標籤）
+const formattedEditError = computed(() => {
+  if (!props.output) return '';
+  // 提取 <tool_use_error> 標籤中的內容
+  const match = props.output.match(/<tool_use_error>([\s\S]*?)<\/tool_use_error>/);
+  if (match) {
+    return match[1].trim();
+  }
+  // 如果沒有標籤，直接返回原始內容
+  return props.output;
+});
+
 // 切換展開狀態
 function toggleExpand() {
   isExpanded.value = !isExpanded.value;
-}
-
-// 渲染 Markdown（用於 Plan 內容）
-function renderMarkdown(content: string): string {
-  return marked.parse(content, { async: false }) as string;
 }
 </script>
 
@@ -249,7 +318,12 @@ function renderMarkdown(content: string): string {
       <span class="tool-dot" :class="{ running: toolStatus === 'running' }" :style="{ backgroundColor: toolColor }"></span>
       <span class="tool-type" :class="{ unknown: !isKnownTool }">{{ type }}</span>
       <span v-if="pattern || query" class="tool-pattern">"{{ pattern || query }}"</span>
-      <span v-else-if="path || notebookPath" class="tool-path">{{ path || notebookPath }}</span>
+      <span
+        v-else-if="path || notebookPath"
+        class="tool-path clickable"
+        @click.stop="openFile(path || notebookPath!)"
+        :title="ideConnected ? '在編輯器中開啟' : '在檔案總管中顯示'"
+      >{{ path || notebookPath }}</span>
       <span v-else-if="skill" class="tool-pattern">/{{ skill }}</span>
       <span v-if="summary" class="tool-summary">{{ summary }}</span>
       <span v-else-if="(type === 'Grep' || type === 'Glob') && output" class="tool-summary">{{ outputLineCount }} {{ outputLineCount === 1 ? 'line' : 'lines' }} of output</span>
@@ -313,10 +387,40 @@ function renderMarkdown(content: string): string {
         </div>
       </template>
 
-      <!-- Edit 工具：Side-by-side Diff -->
+      <!-- Edit 工具：VS Code 風格 Diff View -->
       <template v-if="type === 'Edit'">
-        <!-- 如果有 oldCode/newCode，顯示 side-by-side diff -->
-        <div v-if="oldCode || newCode" class="diff-sidebyside">
+        <!-- 錯誤訊息（優先顯示） -->
+        <div v-if="isEditError && output" class="tool-error">
+          <span class="error-icon">⚠</span>
+          <span class="error-message">{{ formattedEditError }}</span>
+        </div>
+        <!-- 優先使用 structuredPatch（VS Code 風格） -->
+        <div v-else-if="structuredPatch && structuredPatch.length > 0" class="diff-vscode">
+          <div v-for="(hunk, hunkIdx) in structuredPatch" :key="hunkIdx" class="diff-hunk">
+            <div class="diff-hunk-header">
+              @@ -{{ hunk.oldStart }},{{ hunk.oldLines }} +{{ hunk.newStart }},{{ hunk.newLines }} @@
+            </div>
+            <div class="diff-lines">
+              <div
+                v-for="(lineInfo, lineIdx) in computeDiffLineNumbers(hunk)"
+                :key="lineIdx"
+                class="diff-line"
+                :class="{
+                  'diff-line-unchanged': lineInfo.prefix === ' ',
+                  'diff-line-deleted': lineInfo.prefix === '-',
+                  'diff-line-added': lineInfo.prefix === '+'
+                }"
+              >
+                <span class="diff-line-no old">{{ lineInfo.oldLineNo ?? '' }}</span>
+                <span class="diff-line-no new">{{ lineInfo.newLineNo ?? '' }}</span>
+                <span class="diff-line-prefix">{{ lineInfo.prefix }}</span>
+                <span class="diff-line-content"><code v-html="highlightCode(lineInfo.content, guessLanguage(path))"></code></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Fallback：如果有 oldCode/newCode，顯示 side-by-side diff -->
+        <div v-else-if="oldCode || newCode" class="diff-sidebyside">
           <div class="diff-panel old">
             <div class="diff-panel-header">
               <span>OLD</span>
@@ -860,6 +964,19 @@ function renderMarkdown(content: string): string {
   flex: 1;
 }
 
+.tool-path.clickable {
+  color: var(--primary-light, #6ba3e0);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.tool-path.clickable:hover {
+  color: #fff;
+  text-decoration-style: solid;
+}
+
 .tool-pattern {
   color: #f39c12;
   font-family: 'Consolas', 'Monaco', monospace;
@@ -1137,6 +1254,137 @@ pre.block-content {
 
 .diff-panel.new code {
   color: #e8e8e8;
+}
+
+/* Edit 工具錯誤訊息 */
+.tool-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px;
+  background-color: rgba(231, 156, 60, 0.15);
+  border: 1px solid rgba(231, 156, 60, 0.3);
+  border-radius: 6px;
+  color: #d7974d;
+}
+
+.tool-error .error-icon {
+  flex-shrink: 0;
+  font-size: 1.1em;
+}
+
+.tool-error .error-message {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9em;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* VS Code 風格 Diff View */
+.diff-vscode {
+  margin-top: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  background-color: rgba(0, 0, 0, 0.3);
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.85em;
+}
+
+.diff-hunk {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.diff-hunk:last-child {
+  border-bottom: none;
+}
+
+.diff-hunk-header {
+  padding: 4px 12px;
+  background-color: rgba(52, 152, 219, 0.2);
+  color: #6ba3e0;
+  font-size: 0.85em;
+  font-weight: 500;
+}
+
+.diff-lines {
+  padding: 0;
+}
+
+.diff-line {
+  display: flex;
+  line-height: 1.5;
+  padding: 0 8px 0 0;
+}
+
+.diff-line-no {
+  width: 40px;
+  flex-shrink: 0;
+  text-align: right;
+  padding-right: 8px;
+  user-select: none;
+  color: var(--text-muted);
+  opacity: 0.6;
+  font-size: 0.9em;
+}
+
+.diff-line-no.old {
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.diff-line-no.new {
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.diff-line-deleted .diff-line-no.old {
+  color: #e74c3c;
+  opacity: 0.8;
+}
+
+.diff-line-added .diff-line-no.new {
+  color: #2ecc71;
+  opacity: 0.8;
+}
+
+.diff-line-prefix {
+  width: 20px;
+  flex-shrink: 0;
+  text-align: center;
+  user-select: none;
+  color: var(--text-muted);
+}
+
+.diff-line-content {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-line-content code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.diff-line-unchanged {
+  background-color: transparent;
+}
+
+.diff-line-deleted {
+  background-color: rgba(231, 76, 60, 0.15);
+}
+
+.diff-line-deleted .diff-line-prefix {
+  color: #e74c3c;
+}
+
+.diff-line-added {
+  background-color: rgba(46, 204, 113, 0.15);
+}
+
+.diff-line-added .diff-line-prefix {
+  color: #2ecc71;
 }
 
 .diff-divider {
