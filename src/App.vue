@@ -3,6 +3,7 @@ import { ref, nextTick, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readImage } from "@tauri-apps/plugin-clipboard-manager";
+import { File, Folder, Paperclip, Copy, Check, Square, Slash } from "lucide-vue-next";
 import ToolIndicator from "./components/ToolIndicator.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
 import PlanApprovalDialog from "./components/PlanApprovalDialog.vue";
@@ -103,6 +104,7 @@ const mentionSelectedIndex = ref(0);   // 選單中選中的項目索引
 // 附加的圖片列表
 const attachedImages = ref<AttachedImage[]>([]);
 let imageIdCounter = 0;
+const fileInputRef = ref<HTMLInputElement | null>(null);
 
 // 是否正在等待回應
 const isLoading = ref(false);
@@ -120,7 +122,7 @@ const uniThinkingTexts = [
 
   // 工程師風格
   "Debug 中",
-  "Compiling...",
+  "Compiling",
   "npm thinking",
   "git thinking",
   "重構思緒中",
@@ -129,10 +131,10 @@ const uniThinkingTexts = [
 
   // 阿宇口頭禪
   "讓我想想",
-  "這個嘛...",
-  "嗯......",
+  "這個嘛",
+  "嗯",
   "欸等等",
-  "從另一個角度想的話...",
+  "從另一個角度想的話",
 
   // 生活化
   "泡咖啡中",
@@ -148,7 +150,7 @@ const uniThinkingTexts = [
 ];
 
 // 忙碌狀態符號（包含狗狗元素 🐕）
-const thinkingSymbols = ['·', '◦', '○', '◉', '●', '🐾', '🐕', '🐶', '🦴', '🐩', '🐕‍🦺'];
+const thinkingSymbols = ['👓', '💭', '🍵','🥤', '🍓', '☕', '💻', '⌨️', '🐾', '🐕', '🐶', '🦴', '🐩', '🐕‍🦺'];
 
 // 忙碌狀態文字
 const busyStatus = ref('');
@@ -160,7 +162,7 @@ function getRandomThinkingText(): string {
   const text = uniThinkingTexts[Math.floor(Math.random() * uniThinkingTexts.length)];
   const symbol = thinkingSymbols[symbolIndex % thinkingSymbols.length];
   symbolIndex++;
-  return `${text} ${symbol}`;
+  return `${text}... ${symbol}`;
 }
 
 // 開始忙碌文字動畫
@@ -192,7 +194,7 @@ const editModeLabels: Record<EditMode, string> = {
 const editModeIcons: Record<EditMode, string> = {
   default: '▶',
   acceptEdits: '⏩︎',
-  bypassPermissions: '⚡',
+  bypassPermissions: '❉',
   plan: '⏸'  // pause
 };
 
@@ -574,6 +576,10 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     }
     if (showSlashMenu.value) {
       showSlashMenu.value = false;
+      // 如果輸入框只有 "/" 開頭的內容，清空
+      if (userInput.value.startsWith('/') && !userInput.value.includes(' ')) {
+        userInput.value = '';
+      }
       return;
     }
     if (isLoading.value) {
@@ -918,7 +924,7 @@ async function sendMessage() {
   // 加入使用者訊息（顯示用，包含圖片標記）
   let displayContent = content;
   if (attachedImages.value.length > 0) {
-    displayContent += `\n📷 附加 ${attachedImages.value.length} 張圖片`;
+    displayContent += `\n[附加 ${attachedImages.value.length} 張圖片]`;
   }
   messages.value.push({
     role: 'user',
@@ -983,45 +989,86 @@ async function handlePaste(e: ClipboardEvent) {
     // 嘗試從剪貼簿讀取圖片
     const image = await readImage();
     if (image) {
-      // 取得圖片資料和尺寸
-      const rgba = await image.rgba();
-      const size = await image.size();
-      const { width, height } = size;
-
-      // 儲存到臨時檔案
-      const filePath = await invoke<string>('save_temp_image', {
-        rgbaData: Array.from(rgba),
-        width,
-        height,
-      });
-
-      // 產生唯一 ID
-      const id = `img_${++imageIdCounter}_${Date.now()}`;
-
-      // 將 RGBA 轉為可顯示的格式（使用 canvas）
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
-        ctx.putImageData(imageData, 0, 0);
-        const previewUrl = canvas.toDataURL('image/png');
-
-        // 加入附加圖片列表
-        attachedImages.value.push({
-          id,
-          path: filePath,
-          name: `截圖_${new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.png`,
-          isTemp: true,
-          previewUrl,
-        });
-
-        console.log('📷 Image pasted:', filePath);
-      }
-
       // 阻止預設貼上行為（不要把圖片內容貼到輸入框）
       e.preventDefault();
+
+      // 產生唯一 ID 和時間戳記
+      const id = `img_${++imageIdCounter}_${Date.now()}`;
+      const timestamp = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const name = `截圖_${timestamp}.png`;
+
+      // 立即加入 loading 狀態的項目（讓用戶知道正在處理）
+      attachedImages.value.push({
+        id,
+        path: '',  // 稍後填入
+        name,
+        isTemp: true,
+        isLoading: true,
+      });
+
+      try {
+        // 並行取得圖片資料和尺寸
+        const [rgba, size] = await Promise.all([image.rgba(), image.size()]);
+        const { width, height } = size;
+
+        // 先產生縮圖預覽（讓 UI 快速響應）
+        const originalCanvas = document.createElement('canvas');
+        originalCanvas.width = width;
+        originalCanvas.height = height;
+        const originalCtx = originalCanvas.getContext('2d');
+
+        if (originalCtx) {
+          const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
+          originalCtx.putImageData(imageData, 0, 0);
+
+          // 產生縮圖（預覽用，不需要原始解析度）
+          const maxPreviewSize = 100;
+          const scale = Math.min(maxPreviewSize / width, maxPreviewSize / height, 1);
+          const previewCanvas = document.createElement('canvas');
+          previewCanvas.width = Math.round(width * scale);
+          previewCanvas.height = Math.round(height * scale);
+          const previewCtx = previewCanvas.getContext('2d');
+
+          if (previewCtx) {
+            previewCtx.drawImage(originalCanvas, 0, 0, previewCanvas.width, previewCanvas.height);
+            const previewUrl = previewCanvas.toDataURL('image/png');
+
+            // 先更新預覽圖（讓用戶立即看到）
+            const item = attachedImages.value.find(img => img.id === id);
+            if (item) {
+              item.previewUrl = previewUrl;
+            }
+          }
+
+          // 然後在背景儲存到臨時檔案
+          // 使用 originalCanvas 取得 PNG blob，避免 Array.from 複製
+          const blob = await new Promise<Blob>((resolve, reject) => {
+            originalCanvas.toBlob(b => b ? resolve(b) : reject(new Error('Failed to create blob')), 'image/png');
+          });
+          const arrayBuffer = await blob.arrayBuffer();
+          const pngData = Array.from(new Uint8Array(arrayBuffer));
+
+          const filePath = await invoke<string>('save_temp_image_png', {
+            pngData,
+          });
+
+          // 更新項目（移除 loading 狀態）
+          const item = attachedImages.value.find(img => img.id === id);
+          if (item) {
+            item.path = filePath;
+            item.isLoading = false;
+          }
+
+          console.log('📷 Image pasted:', filePath);
+        }
+      } catch (processErr) {
+        // 處理過程中出錯，移除 loading 項目
+        console.error('Failed to process clipboard image:', processErr);
+        const index = attachedImages.value.findIndex(img => img.id === id);
+        if (index !== -1) {
+          attachedImages.value.splice(index, 1);
+        }
+      }
     }
   } catch (err) {
     // 剪貼簿沒有圖片，讓預設行為處理（貼上文字）
@@ -1047,6 +1094,64 @@ async function removeAttachedImage(id: string) {
     // 從列表中移除
     attachedImages.value.splice(index, 1);
   }
+}
+
+// 觸發檔案選擇對話框
+function triggerFileInput() {
+  fileInputRef.value?.click();
+}
+
+// 處理檔案選擇
+async function handleFileSelect(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const files = input.files;
+  if (!files || files.length === 0) return;
+
+  for (const file of Array.from(files)) {
+    // 只處理圖片檔案
+    if (!file.type.startsWith('image/')) continue;
+
+    const id = `img_${++imageIdCounter}`;
+
+    // 建立預覽 URL
+    const previewUrl = URL.createObjectURL(file);
+
+    // 先加入 loading 狀態
+    attachedImages.value.push({
+      id,
+      path: '',
+      name: file.name,
+      isTemp: true,
+      previewUrl,
+      isLoading: true,
+    });
+
+    // 讀取檔案並保存到臨時目錄
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pngData = new Uint8Array(arrayBuffer);
+      const filePath = await invoke<string>('save_temp_image_png', {
+        pngData: Array.from(pngData)
+      });
+
+      // 更新路徑
+      const item = attachedImages.value.find(img => img.id === id);
+      if (item) {
+        item.path = filePath;
+        item.isLoading = false;
+      }
+    } catch (err) {
+      console.error('Failed to save selected image:', err);
+      // 移除失敗的項目
+      const index = attachedImages.value.findIndex(img => img.id === id);
+      if (index !== -1) {
+        attachedImages.value.splice(index, 1);
+      }
+    }
+  }
+
+  // 重置 input，讓用戶可以再次選擇同一檔案
+  input.value = '';
 }
 
 // 處理拖曳進入（防止預設行為）
@@ -1094,11 +1199,30 @@ async function handleDrop(e: DragEvent) {
   }
 }
 
-// @-Mention: 處理輸入變化
+// @-Mention 和 /-Command: 處理輸入變化
 async function handleInput(e: Event) {
   const target = e.target as HTMLTextAreaElement;
   const value = target.value;
   const cursorPos = target.selectionStart || 0;
+
+  // 斜線選單：當輸入框只有 "/" 開頭時自動打開
+  if (value.startsWith('/') && !showSlashMenu.value) {
+    showSlashMenu.value = true;
+    slashFilter.value = value; // 包含 "/"，會被 filteredSkills 處理
+    loadSkills();
+    return;
+  }
+
+  // 如果斜線選單開啟中，更新過濾文字
+  if (showSlashMenu.value && value.startsWith('/')) {
+    slashFilter.value = value;
+    return;
+  }
+
+  // 如果輸入不再以 "/" 開頭，關閉斜線選單
+  if (showSlashMenu.value && !value.startsWith('/')) {
+    showSlashMenu.value = false;
+  }
 
   // 尋找游標前最近的 @ 符號
   const textBeforeCursor = value.substring(0, cursorPos);
@@ -1307,7 +1431,11 @@ async function loadSkills() {
 
 // 過濾後的 Skills 列表
 const filteredSkills = computed(() => {
-  const filter = slashFilter.value.toLowerCase();
+  let filter = slashFilter.value.toLowerCase();
+  // 移除開頭的 "/"（用戶習慣輸入 "/commit" 來搜尋）
+  if (filter.startsWith('/')) {
+    filter = filter.slice(1);
+  }
   if (!filter) return allSkills.value;
 
   return allSkills.value.filter(skill =>
@@ -1316,18 +1444,40 @@ const filteredSkills = computed(() => {
   );
 });
 
+// 顯示用的篩選文字（去除 "/" 前綴）
+const displaySlashFilter = computed(() => {
+  let filter = slashFilter.value;
+  if (filter.startsWith('/')) {
+    filter = filter.slice(1);
+  }
+  return filter;
+});
+
 // 打開斜線選單時載入 Skills
 function openSlashMenu() {
-  showSlashMenu.value = !showSlashMenu.value;
   if (showSlashMenu.value) {
+    // 關閉選單
+    showSlashMenu.value = false;
+    // 如果輸入框只有 "/" 開頭的內容，清空
+    if (userInput.value.startsWith('/') && !userInput.value.includes(' ')) {
+      userInput.value = '';
+    }
+  } else {
+    // 打開選單
+    showSlashMenu.value = true;
     loadSkills();
-    slashFilter.value = '';
+    // 如果輸入框不是 "/" 開頭，自動插入 "/"
+    if (!userInput.value.startsWith('/')) {
+      userInput.value = '/' + userInput.value;
+    }
+    slashFilter.value = userInput.value;
   }
 }
 
 // 執行斜線命令
 async function executeSlashCommand(command: string) {
   showSlashMenu.value = false;
+  userInput.value = '';  // 清空輸入框
 
   // 將斜線命令作為訊息發送
   messages.value.push({
@@ -1399,6 +1549,25 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
       });
       console.log(`✅ Permission response sent: ${behavior}`);
 
+      // 標記舊的工具為已處理（不管是允許還是拒絕）
+      // 這樣工具指示燈就不會繼續閃爍
+      const tool = currentToolUses.value.find(t => t.id === toolId);
+      if (tool) {
+        tool.isCancelled = true;
+        tool.userResponse = isAllow ? 'Permission granted (will retry)' : 'Permission denied by user';
+      }
+      const lastMsg = messages.value[messages.value.length - 1];
+      if (lastMsg && lastMsg.role === 'assistant') {
+        const toolItem = lastMsg.items.find(
+          (item): item is { type: 'tool'; tool: ToolUseItem } =>
+            item.type === 'tool' && item.tool.id === toolId
+        );
+        if (toolItem) {
+          toolItem.tool.isCancelled = true;
+          toolItem.tool.userResponse = isAllow ? 'Permission granted (will retry)' : 'Permission denied by user';
+        }
+      }
+
       // 處理白名單
       if (response === 'yes-all' && hookSessionId) {
         // 將工具加入 Session 白名單（後端）
@@ -1450,6 +1619,24 @@ async function handlePermissionResponseLegacy(
 
   // 預備重新執行：創建新的 assistant 訊息，避免覆蓋之前的回應
   function prepareForRetry() {
+    // 標記舊的工具為已處理（將要重試）
+    const tool = currentToolUses.value.find(t => t.id === toolId);
+    if (tool) {
+      tool.isCancelled = true;
+      tool.userResponse = 'Permission granted (will retry)';
+    }
+    const lastMsg = messages.value[messages.value.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant') {
+      const toolItem = lastMsg.items.find(
+        (item): item is { type: 'tool'; tool: ToolUseItem } =>
+          item.type === 'tool' && item.tool.id === toolId
+      );
+      if (toolItem) {
+        toolItem.tool.isCancelled = true;
+        toolItem.tool.userResponse = 'Permission granted (will retry)';
+      }
+    }
+
     // 清空 streamingText
     streamingText.value = '';
     // 創建新的空 assistant 訊息，這樣 handleTextEvent 會在新訊息中追加
@@ -1862,7 +2049,8 @@ async function interruptRequest() {
                   @click="copyToClipboard(item.content, `${msgIndex}-${itemIndex}`)"
                   :title="copiedIndex === `${msgIndex}-${itemIndex}` ? '已複製！' : '複製原始文字'"
                 >
-                  {{ copiedIndex === `${msgIndex}-${itemIndex}` ? '✓' : '❐ 複製' }}
+                  <Check v-if="copiedIndex === `${msgIndex}-${itemIndex}`" :size="14" />
+                  <template v-else><Copy :size="14" /> 複製</template>
                 </button>
               </div>
             </template>
@@ -1950,7 +2138,7 @@ async function interruptRequest() {
         <!-- @-Mention 選單 -->
         <div v-if="showMentionMenu && mentionFiles.length > 0" class="mention-menu">
           <div class="mention-header">
-            <span class="mention-icon">📄</span>
+            <File class="mention-icon" :size="16" />
             <span>Files</span>
             <span class="mention-filter" v-if="mentionFilter">{{ mentionFilter }}</span>
           </div>
@@ -1961,7 +2149,7 @@ async function interruptRequest() {
             @click="selectMentionFile(file)"
             @mouseenter="mentionSelectedIndex = index"
           >
-            <span class="mention-item-icon">{{ file.is_dir ? '📁' : '📄' }}</span>
+            <component :is="file.is_dir ? Folder : File" class="mention-item-icon" :size="16" />
             <span class="mention-item-name">{{ file.name }}</span>
             <span class="mention-item-path" v-if="mentionFilter.includes('/')">{{ file.path }}</span>
           </div>
@@ -1977,7 +2165,7 @@ async function interruptRequest() {
             <span class="mode-label">{{ editModeLabels[editMode] }}</span>
           </button>
           <button class="status-btn working-dir" :title="workingDir || '未知'">
-            <span class="dir-icon">📁</span>
+            <Folder class="dir-icon" :size="14" />
             <span class="dir-name">{{ workingDirName }}</span>
           </button>
           <button
@@ -2017,11 +2205,19 @@ async function interruptRequest() {
 
         <!-- 右側按鈕 -->
         <div class="status-right">
-          <button class="status-btn attach-btn" title="Attach files">
-            <span class="attach-icon">📎</span>
+          <button class="status-btn attach-btn" @click="triggerFileInput" title="Attach files (images)">
+            <Paperclip class="attach-icon" :size="16" />
           </button>
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept="image/*"
+            multiple
+            style="display: none"
+            @change="handleFileSelect"
+          />
           <button class="status-btn slash-btn" @click="openSlashMenu" title="Commands">
-            <span class="slash-icon">/</span>
+            <Slash class="slash-icon" :size="16" />
           </button>
           <button
             v-if="!isLoading"
@@ -2038,24 +2234,21 @@ async function interruptRequest() {
             @click="interruptRequest"
             title="Interrupt (Esc)"
           >
-            <span class="interrupt-icon">■</span>
+            <Square class="interrupt-icon" :size="14" />
           </button>
         </div>
       </div>
 
       <!-- 斜線選單 -->
       <div v-if="showSlashMenu" class="slash-menu">
-        <input
-          type="text"
-          class="slash-search"
-          v-model="slashFilter"
-          placeholder="Filter actions..."
-          @keydown.escape="showSlashMenu = false"
-        />
+        <div class="slash-header">
+          <Slash class="slash-header-icon" :size="16" />
+          <span>Commands</span>
+          <span class="slash-header-filter" v-if="displaySlashFilter">{{ displaySlashFilter }}</span>
+        </div>
 
         <!-- 動態載入的 Slash Commands -->
         <div class="slash-section" v-if="filteredSkills.length > 0">
-          <div class="slash-section-title">Slash Commands</div>
           <div
             v-for="skill in filteredSkills"
             :key="skill.name"
@@ -2410,8 +2603,8 @@ body {
 
 .copy-btn {
   position: absolute;
-  bottom: 8px;
-  right: 8px;
+  bottom: 4px;
+  right: 4px;
   height: 28px;
   padding: 0 10px;
   border: none;
@@ -2425,6 +2618,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
 }
 
 .copy-btn:hover {
@@ -2766,30 +2960,40 @@ textarea:disabled {
 .slash-menu {
   position: absolute;
   bottom: 100%;
-  right: 20px;
-  width: 320px;
-  max-height: 400px;
+  left: 0;
+  right: 0;
+  max-height: 300px;
   overflow-y: auto;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  margin-bottom: 4px;
   z-index: 100;
 }
 
-.slash-search {
-  width: 100%;
-  padding: 12px;
-  background: transparent;
-  border: none;
+.slash-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
-  color: var(--text-color);
-  font-size: 0.9rem;
-  outline: none;
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
-.slash-search::placeholder {
-  color: var(--text-muted);
+.slash-header-icon {
+  font-size: 1rem;
+  font-weight: bold;
+  color: var(--primary-light);
+}
+
+.slash-header-filter {
+  margin-left: auto;
+  font-family: monospace;
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 
 .slash-section {

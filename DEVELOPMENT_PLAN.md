@@ -139,7 +139,7 @@
   - `/compact` - 手動壓縮上下文
   - `/cost` - 查看使用費用
   - `/clear` - 清除對話（新對話）
-- [ ] **動態 Slash Commands 載入** 🔄
+- [x] **動態 Slash Commands 載入** 🔄
   - 掃描 `~/.claude/skills/` 和 `.claude/skills/` 取得自定義 Skills
   - 內建命令列表（對齊 Claude Code CLI）
   - 斜線選單動態顯示所有可用命令
@@ -271,7 +271,7 @@ Tsunu Alive App
 
 兩者互補，不衝突。
 
-### Phase 4.9：圖片輸入功能
+### Phase 4.9：圖片輸入功能 ✅ 完成
 
 讓使用者可以傳送圖片給 Claude 分析，提升 UI 設計、截圖 debug 等使用情境的體驗。
 
@@ -280,9 +280,9 @@ Tsunu Alive App
 - 例：`claude -p "描述這張圖片 D:/path/to/image.png"`
 
 **輸入方式：**
-- [ ] **Ctrl+V 剪貼簿圖片** - 最常用，截圖後直接貼上
-- [ ] **拖曳圖片檔案** - 從檔案總管拖進輸入框
-- [ ] **手動輸入路徑** - 自動偵測 `.png`, `.jpg`, `.gif` 等副檔名
+- [x] **Ctrl+V 剪貼簿圖片** - 最常用，截圖後直接貼上
+- [x] **📎 附加檔案按鈕** - 點擊選擇圖片檔案
+- [ ] **拖曳圖片檔案** - 從檔案總管拖進輸入框（未實作）
 
 **UI 設計：**
 ```
@@ -296,14 +296,16 @@ Tsunu Alive App
 ```
 
 **技術實作：**
-- [ ] **Tauri clipboard plugin** - 讀取剪貼簿圖片
-- [ ] **臨時檔案管理** - 儲存剪貼簿圖片到 `%TEMP%/tsunu_alive/`
-- [ ] **ImagePreview 組件** - 縮圖預覽 + 移除按鈕
-- [ ] **發送時附加路徑** - 自動在 prompt 中附加圖片路徑
 
-**參考：**
-- VS Code Claude 擴充：剪貼簿貼上後顯示小縮圖預覽
-- PyCharm：偵測圖片路徑後顯示「偵測到圖片」標示
+- [x] **Tauri save_temp_image_png** - 儲存剪貼簿圖片（PNG 格式直接寫入）
+- [x] **臨時檔案管理** - 儲存到 `%TEMP%/tsunu_alive/`，發送後自動清理
+- [x] **ImagePreview 組件** - 縮圖預覽 + 移除按鈕 + Loading 狀態
+- [x] **發送時附加路徑** - 自動在 prompt 中附加圖片絕對路徑
+
+**額外改進：**
+
+- [x] Lucide 圖示整合 - 取代 emoji，介面風格更一致
+- [x] Slash 選單樣式統一 - 改為全寬 popover 樣式，與 @-Mention 一致
 
 ### Phase 4.10：VS Code 風格 Diff View ✅ 完成
 

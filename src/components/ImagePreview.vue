@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import { Image, X } from 'lucide-vue-next';
 
 // 附加圖片項目
 export interface AttachedImage {
@@ -8,6 +9,7 @@ export interface AttachedImage {
   name: string;        // 顯示名稱
   isTemp: boolean;     // 是否為臨時檔案（剪貼簿圖片）
   previewUrl?: string; // 預覽用的 blob URL
+  isLoading?: boolean; // 是否正在處理中
 }
 
 const props = defineProps<{
@@ -41,22 +43,26 @@ function handleRemove() {
 </script>
 
 <template>
-  <div class="image-preview">
+  <div class="image-preview" :class="{ loading: image.isLoading }">
     <!-- 縮圖 -->
     <div class="thumbnail">
+      <!-- Loading 狀態 -->
+      <div v-if="image.isLoading" class="loading-spinner"></div>
+      <!-- 有預覽圖 -->
       <img
-        v-if="image.previewUrl"
+        v-else-if="image.previewUrl"
         :src="image.previewUrl"
         :alt="image.name"
       />
-      <div v-else class="placeholder">📷</div>
+      <!-- 無預覽圖 -->
+      <div v-else class="placeholder"><Image :size="18" /></div>
     </div>
 
     <!-- 檔案名稱 -->
     <span class="filename" :title="image.name">{{ displayName }}</span>
 
-    <!-- 移除按鈕 -->
-    <button class="remove-btn" @click="handleRemove" title="移除圖片">×</button>
+    <!-- 移除按鈕（loading 時不顯示） -->
+    <button v-if="!image.isLoading" class="remove-btn" @click="handleRemove" title="移除圖片"><X :size="14" /></button>
   </div>
 </template>
 
@@ -125,5 +131,25 @@ function handleRemove() {
 .remove-btn:hover {
   background-color: rgba(231, 76, 60, 0.3);
   color: #e74c3c;
+}
+
+/* Loading 狀態 */
+.image-preview.loading {
+  opacity: 0.7;
+}
+
+.loading-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--primary-light, #6ba3e0);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

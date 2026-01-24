@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import hljs from 'highlight.js';
 import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
 import { renderMarkdown } from '../utils/markdown';
+import { AlertTriangle, Check, Circle, CircleDot, Copy } from 'lucide-vue-next';
 
 // 複製狀態追蹤
 const copiedBlockId = ref<string | null>(null);
@@ -286,15 +287,19 @@ function computeDiffLineNumbers(hunk: DiffHunk): DiffLineInfo[] {
   return result;
 }
 
-// 判斷 Edit 工具是否失敗（來自 Claude CLI 的 is_error 欄位）
-const isEditError = computed(() => {
-  if (props.type !== 'Edit') return false;
-  // 只用 isCancelled 判斷（來自 Claude CLI 的 is_error: true）
+// 判斷工具是否失敗（通用，來自 Claude CLI 的 is_error 欄位或權限被拒絕）
+const isToolError = computed(() => {
   return props.isCancelled === true;
 });
 
-// 格式化 Edit 錯誤訊息（移除 <tool_use_error> 標籤）
-const formattedEditError = computed(() => {
+// 判斷 Edit 工具是否失敗（保留向後兼容）
+const isEditError = computed(() => {
+  if (props.type !== 'Edit') return false;
+  return isToolError.value;
+});
+
+// 格式化錯誤訊息（移除 <tool_use_error> 標籤，通用）
+const formattedErrorMessage = computed(() => {
   if (!props.output) return '';
   // 提取 <tool_use_error> 標籤中的內容
   const match = props.output.match(/<tool_use_error>([\s\S]*?)<\/tool_use_error>/);
@@ -304,6 +309,9 @@ const formattedEditError = computed(() => {
   // 如果沒有標籤，直接返回原始內容
   return props.output;
 });
+
+// 格式化 Edit 錯誤訊息（保留向後兼容）
+const formattedEditError = computed(() => formattedErrorMessage.value);
 
 // 切換展開狀態
 function toggleExpand() {
@@ -354,7 +362,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'bash-in' }"
               @click.stop="copyToClipboard(input, 'bash-in')"
-            >{{ copiedBlockId === 'bash-in' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'bash-in'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('bash-in') && shouldShowExpand(input) }">
             <pre class="block-content"><code v-html="highlightCode(input, 'bash')"></code></pre>
@@ -371,7 +379,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'bash-out' }"
               @click.stop="copyToClipboard(output, 'bash-out')"
-            >{{ copiedBlockId === 'bash-out' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'bash-out'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('bash-out') && shouldShowExpand(output) }">
             <div class="block-content">
@@ -391,7 +399,7 @@ function toggleExpand() {
       <template v-if="type === 'Edit'">
         <!-- 錯誤訊息（優先顯示） -->
         <div v-if="isEditError && output" class="tool-error">
-          <span class="error-icon">⚠</span>
+          <AlertTriangle class="error-icon" :size="14" />
           <span class="error-message">{{ formattedEditError }}</span>
         </div>
         <!-- 優先使用 structuredPatch（VS Code 風格） -->
@@ -429,7 +437,7 @@ function toggleExpand() {
                 class="copy-btn copy-btn-small"
                 :class="{ copied: copiedBlockId === 'edit-old' }"
                 @click.stop="copyToClipboard(oldCode, 'edit-old')"
-              >{{ copiedBlockId === 'edit-old' ? '✔' : '❐' }}</button>
+              ><Check v-if="copiedBlockId === 'edit-old'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
             </div>
             <pre><code v-html="highlightCode(oldCode || '', guessLanguage(path))"></code></pre>
           </div>
@@ -442,7 +450,7 @@ function toggleExpand() {
                 class="copy-btn copy-btn-small"
                 :class="{ copied: copiedBlockId === 'edit-new' }"
                 @click.stop="copyToClipboard(newCode, 'edit-new')"
-              >{{ copiedBlockId === 'edit-new' ? '✔' : '❐' }}</button>
+              ><Check v-if="copiedBlockId === 'edit-new'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
             </div>
             <pre><code v-html="highlightCode(newCode || '', guessLanguage(path))"></code></pre>
           </div>
@@ -455,7 +463,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'edit-result' }"
               @click.stop="copyToClipboard(output, 'edit-result')"
-            >{{ copiedBlockId === 'edit-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'edit-result'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
@@ -463,14 +471,20 @@ function toggleExpand() {
 
       <!-- Read 工具：顯示讀取結果 -->
       <template v-if="type === 'Read'">
-        <div v-if="output" class="tool-block output">
+        <!-- 錯誤訊息（權限被拒絕等） -->
+        <div v-if="isToolError && output" class="tool-error">
+          <AlertTriangle class="error-icon" :size="14" />
+          <span class="error-message">{{ formattedErrorMessage }}</span>
+        </div>
+        <!-- 正常內容 -->
+        <div v-else-if="output" class="tool-block output">
           <div class="block-header">
             <div class="block-label">CONTENT</div>
             <button
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'read-content' }"
               @click.stop="copyToClipboard(output, 'read-content')"
-            >{{ copiedBlockId === 'read-content' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'read-content'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('read-content') && shouldShowExpand(output) }">
             <pre class="block-content"><code v-html="highlightCode(output, guessLanguage(path))"></code></pre>
@@ -490,7 +504,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'write-content' }"
               @click.stop="copyToClipboard(content, 'write-content')"
-            >{{ copiedBlockId === 'write-content' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'write-content'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('write-content') && shouldShowExpand(content) }">
             <pre class="block-content"><code v-html="highlightCode(content, guessLanguage(path))"></code></pre>
@@ -506,7 +520,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'write-result' }"
               @click.stop="copyToClipboard(output, 'write-result')"
-            >{{ copiedBlockId === 'write-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'write-result'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
@@ -521,7 +535,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'task-prompt' }"
               @click.stop="copyToClipboard(prompt, 'task-prompt')"
-            >{{ copiedBlockId === 'task-prompt' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'task-prompt'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('task-prompt') && shouldShowExpand(prompt) }">
             <pre class="block-content"><code>{{ prompt }}</code></pre>
@@ -537,7 +551,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'task-result' }"
               @click.stop="copyToClipboard(output, 'task-result')"
-            >{{ copiedBlockId === 'task-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'task-result'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('task-result') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -560,7 +574,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'taskoutput-output' }"
               @click.stop="copyToClipboard(output, 'taskoutput-output')"
-            >{{ copiedBlockId === 'taskoutput-output' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'taskoutput-output'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('taskoutput-output') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -580,7 +594,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'websearch-query' }"
               @click.stop="copyToClipboard(query, 'websearch-query')"
-            >{{ copiedBlockId === 'websearch-query' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'websearch-query'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <pre class="block-content"><code>{{ query }}</code></pre>
         </div>
@@ -592,7 +606,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'websearch-result' }"
               @click.stop="copyToClipboard(output, 'websearch-result')"
-            >{{ copiedBlockId === 'websearch-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'websearch-result'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('websearch-result') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -612,7 +626,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'webfetch-url' }"
               @click.stop="copyToClipboard(query, 'webfetch-url')"
-            >{{ copiedBlockId === 'webfetch-url' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'webfetch-url'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <pre class="block-content"><code>{{ query }}</code></pre>
         </div>
@@ -624,7 +638,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'webfetch-response' }"
               @click.stop="copyToClipboard(output, 'webfetch-response')"
-            >{{ copiedBlockId === 'webfetch-response' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'webfetch-response'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('webfetch-response') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -647,7 +661,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'grep-matches' }"
               @click.stop="copyToClipboard(output, 'grep-matches')"
-            >{{ copiedBlockId === 'grep-matches' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'grep-matches'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('grep-matches') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -670,7 +684,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'glob-files' }"
               @click.stop="copyToClipboard(output, 'glob-files')"
-            >{{ copiedBlockId === 'glob-files' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'glob-files'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('glob-files') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -691,7 +705,9 @@ function toggleExpand() {
             :class="todo.status"
           >
             <span class="todo-icon">
-              {{ todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '●' : '○' }}
+              <Check v-if="todo.status === 'completed'" :size="14" />
+              <CircleDot v-else-if="todo.status === 'in_progress'" :size="14" />
+              <Circle v-else :size="14" />
             </span>
             <span class="todo-content">{{ todo.content }}</span>
           </div>
@@ -718,7 +734,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'ask-answer' }"
               @click.stop="copyToClipboard(output, 'ask-answer')"
-            >{{ copiedBlockId === 'ask-answer' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'ask-answer'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
@@ -738,7 +754,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'notebook-source' }"
               @click.stop="copyToClipboard(newSource, 'notebook-source')"
-            >{{ copiedBlockId === 'notebook-source' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'notebook-source'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('notebook-source') && shouldShowExpand(newSource) }">
             <pre class="block-content"><code v-html="highlightCode(newSource, 'python')"></code></pre>
@@ -761,7 +777,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'killshell-result' }"
               @click.stop="copyToClipboard(output, 'killshell-result')"
-            >{{ copiedBlockId === 'killshell-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'killshell-result'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('killshell-result') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -784,7 +800,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'skill-result' }"
               @click.stop="copyToClipboard(output, 'skill-result')"
-            >{{ copiedBlockId === 'skill-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'skill-result'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('skill-result') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
@@ -815,7 +831,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'plan-filepath' }"
               @click.stop="copyToClipboard(String(rawInput._planFilePath), 'plan-filepath')"
-            >{{ copiedBlockId === 'plan-filepath' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'plan-filepath'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content plan-path-content">
             <span
@@ -851,7 +867,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'plan-content' }"
               @click.stop="copyToClipboard(output, 'plan-content')"
-            >{{ copiedBlockId === 'plan-content' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'plan-content'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('plan-content') && shouldShowExpand(output) }">
             <div class="block-content plan-markdown" v-html="renderMarkdown(output)"></div>
@@ -875,7 +891,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'fallback-input' }"
               @click.stop="copyToClipboard(formattedRawInput, 'fallback-input')"
-            >{{ copiedBlockId === 'fallback-input' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'fallback-input'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('fallback-input') && shouldShowExpand(formattedRawInput) }">
             <pre class="block-content"><code>{{ formattedRawInput }}</code></pre>
@@ -891,7 +907,7 @@ function toggleExpand() {
               class="copy-btn"
               :class="{ copied: copiedBlockId === 'fallback-output' }"
               @click.stop="copyToClipboard(output, 'fallback-output')"
-            >{{ copiedBlockId === 'fallback-output' ? '✔ 已複製' : '❐ 複製' }}</button>
+            ><Check v-if="copiedBlockId === 'fallback-output'" :size="14" /><template v-else><Copy :size="12" /> 複製</template></button>
           </div>
           <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('fallback-output') && shouldShowExpand(output) }">
             <pre class="block-content"><code>{{ output }}</code></pre>
