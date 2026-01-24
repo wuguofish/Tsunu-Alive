@@ -453,8 +453,11 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "user" => {
-            // 工具結果
-            if let Some(tool_result) = json.get("tool_use_result") {
+            // 工具結果（支援 toolUseResult 和 tool_use_result 兩種格式）
+            let tool_result = json.get("toolUseResult")
+                .or_else(|| json.get("tool_use_result"));
+
+            if let Some(tool_result) = tool_result {
                 let tool_id = json.get("message")
                     .and_then(|m| m.get("content"))
                     .and_then(|c| c.as_array())
@@ -474,7 +477,17 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                     .unwrap_or(false);
 
                 // 取得結果內容
-                let result = if let Some(file) = tool_result.get("file") {
+                // 優先順序：
+                // 1. toolUseResult.filePath（ExitPlanMode 計畫檔案路徑）
+                // 2. toolUseResult.file.filePath（檔案相關工具）
+                // 3. message.content[0].content（一般文字結果）
+                // 4. toolUseResult.type（fallback）
+                let result = if let Some(file_path) = tool_result.get("filePath")
+                    .and_then(|p| p.as_str())
+                {
+                    // ExitPlanMode 的計畫檔案路徑
+                    format!("Your plan has been saved to: {}", file_path)
+                } else if let Some(file) = tool_result.get("file") {
                     file.get("filePath")
                         .and_then(|p| p.as_str())
                         .unwrap_or("")

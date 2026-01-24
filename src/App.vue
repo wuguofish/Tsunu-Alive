@@ -99,6 +99,16 @@ interface FileItem {
   is_dir: boolean;
 }
 const showMentionMenu = ref(false);
+
+// Slash Commands (Skills) 相關
+interface SkillItem {
+  name: string;
+  description: string;
+  source: 'builtin' | 'user' | 'project';
+}
+const allSkills = ref<SkillItem[]>([]);
+const slashFilter = ref('');
+const skillsLoaded = ref(false);
 const mentionFilter = ref('');
 const mentionFiles = ref<FileItem[]>([]);
 const mentionCursorPosition = ref(0);  // @ 符號的位置
@@ -420,6 +430,40 @@ function handleClaudeEvent(event: ClaudeEvent) {
     }
   }
 
+  // 特殊處理 ExitPlanMode 的 ToolResult：從結果中解析計畫檔案路徑
+  if (event.event_type === 'ToolResult' && event.result) {
+    // 從 ToolResult 中解析 "Your plan has been saved to: <path>" 格式
+    const planPathMatch = event.result.match(/Your plan has been saved to:\s*(.+\.md)/);
+    if (planPathMatch) {
+      const filePath = planPathMatch[1].trim();
+      console.log('📋 Plan file path from ToolResult:', filePath);
+
+      // 找到對應的工具並附加路徑資訊
+      const tool = currentToolUses.value.find(t => t.id === event.tool_id && t.name === 'ExitPlanMode');
+      if (tool) {
+        tool.input = {
+          ...(tool.input || {}),
+          _planFilePath: filePath,
+        };
+      }
+
+      // 同時更新 messages 中的工具
+      const lastMsg = messages.value[messages.value.length - 1];
+      if (lastMsg && lastMsg.role === 'assistant') {
+        const toolItem = lastMsg.items.find(
+          (item): item is { type: 'tool'; tool: ToolUseItem } =>
+            item.type === 'tool' && item.tool.id === event.tool_id && item.tool.name === 'ExitPlanMode'
+        );
+        if (toolItem) {
+          toolItem.tool.input = {
+            ...(toolItem.tool.input || {}),
+            _planFilePath: filePath,
+          };
+        }
+      }
+    }
+  }
+
   // 取得當前狀態並處理事件
   const state = getCurrentAppState();
   const result = processClaudeEvent(event, state);
@@ -428,7 +472,7 @@ function handleClaudeEvent(event: ClaudeEvent) {
   applyEventResult(result);
 }
 
-// 設定事件監聽
+// 設定事件監聯
 async function setupEventListeners() {
   unlistenClaude = await listen<ClaudeEvent>('claude-event', (event) => {
     handleClaudeEvent(event.payload);
@@ -1041,6 +1085,42 @@ function insertIdeContextReference() {
   console.log('📎 插入 IDE context 參考:', reference);
 }
 
+// 載入所有可用的 Slash Commands (Skills)
+async function loadSkills() {
+  if (skillsLoaded.value) return;
+
+  try {
+    const skills = await invoke<SkillItem[]>('scan_skills', {
+      workingDir: workingDir.value
+    });
+    allSkills.value = skills;
+    skillsLoaded.value = true;
+    console.log('📋 Loaded skills:', skills.length);
+  } catch (error) {
+    console.error('Failed to load skills:', error);
+  }
+}
+
+// 過濾後的 Skills 列表
+const filteredSkills = computed(() => {
+  const filter = slashFilter.value.toLowerCase();
+  if (!filter) return allSkills.value;
+
+  return allSkills.value.filter(skill =>
+    skill.name.toLowerCase().includes(filter) ||
+    skill.description.toLowerCase().includes(filter)
+  );
+});
+
+// 打開斜線選單時載入 Skills
+function openSlashMenu() {
+  showSlashMenu.value = !showSlashMenu.value;
+  if (showSlashMenu.value) {
+    loadSkills();
+    slashFilter.value = '';
+  }
+}
+
 // 執行斜線命令
 async function executeSlashCommand(command: string) {
   showSlashMenu.value = false;
@@ -1417,7 +1497,7 @@ async function interruptRequest() {
                   @click="copyToClipboard(item.content, `${msgIndex}-${itemIndex}`)"
                   :title="copiedIndex === `${msgIndex}-${itemIndex}` ? '已複製！' : '複製原始文字'"
                 >
-                  {{ copiedIndex === `${msgIndex}-${itemIndex}` ? '✓' : '📋' }}
+                  {{ copiedIndex === `${msgIndex}-${itemIndex}` ? '✓' : '❐ 複製' }}
                 </button>
               </div>
             </template>
@@ -1555,7 +1635,7 @@ async function interruptRequest() {
           <button class="status-btn attach-btn" title="Attach files">
             <span class="attach-icon">📎</span>
           </button>
-          <button class="status-btn slash-btn" @click="showSlashMenu = !showSlashMenu" title="Commands">
+          <button class="status-btn slash-btn" @click="openSlashMenu" title="Commands">
             <span class="slash-icon">/</span>
           </button>
           <button
@@ -1580,25 +1660,40 @@ async function interruptRequest() {
 
       <!-- 斜線選單 -->
       <div v-if="showSlashMenu" class="slash-menu">
-        <input type="text" class="slash-search" placeholder="Filter actions..." />
-        <div class="slash-section">
-          <div class="slash-section-title">Model</div>
-          <div class="slash-item" @click="executeSlashCommand('/model')">
-            Switch model... <span class="slash-hint">{{ currentModel || 'default' }}</span>
-          </div>
-        </div>
-        <div class="slash-section">
+        <input
+          type="text"
+          class="slash-search"
+          v-model="slashFilter"
+          placeholder="Filter actions..."
+          @keydown.escape="showSlashMenu = false"
+        />
+
+        <!-- 動態載入的 Slash Commands -->
+        <div class="slash-section" v-if="filteredSkills.length > 0">
           <div class="slash-section-title">Slash Commands</div>
-          <div class="slash-item" @click="executeSlashCommand('/compact')">
-            /compact <span class="slash-hint">壓縮對話歷史</span>
-          </div>
-          <div class="slash-item" @click="executeSlashCommand('/cost')">
-            /cost <span class="slash-hint">查看使用費用</span>
-          </div>
-          <div class="slash-item" @click="executeSlashCommand('/clear')">
-            /clear <span class="slash-hint">開始新對話</span>
+          <div
+            v-for="skill in filteredSkills"
+            :key="skill.name"
+            class="slash-item"
+            @click="executeSlashCommand('/' + skill.name)"
+          >
+            <span class="slash-name">/{{ skill.name }}</span>
+            <span class="slash-hint">{{ skill.description }}</span>
+            <span v-if="skill.source !== 'builtin'" class="slash-source">{{ skill.source }}</span>
           </div>
         </div>
+
+        <!-- 載入中 -->
+        <div v-if="!skillsLoaded" class="slash-section">
+          <div class="slash-item loading">載入中...</div>
+        </div>
+
+        <!-- 無結果 -->
+        <div v-if="skillsLoaded && filteredSkills.length === 0 && slashFilter" class="slash-section">
+          <div class="slash-item no-results">找不到符合「{{ slashFilter }}」的命令</div>
+        </div>
+
+        <!-- Context 資訊 -->
         <div class="slash-section">
           <div class="slash-section-title">Context</div>
           <div class="slash-item context-info">
@@ -1930,10 +2025,10 @@ body {
 
 .copy-btn {
   position: absolute;
-  top: 8px;
+  bottom: 8px;
   right: 8px;
-  width: 28px;
   height: 28px;
+  padding: 0 10px;
   border: none;
   border-radius: 6px;
   background-color: rgba(0, 0, 0, 0.4);
@@ -2338,6 +2433,40 @@ textarea:disabled {
 .slash-hint {
   color: var(--text-muted);
   font-size: 0.8rem;
+  flex: 1;
+  text-align: right;
+  margin-left: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slash-name {
+  font-family: monospace;
+  color: var(--primary-light);
+  flex-shrink: 0;
+}
+
+.slash-source {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background-color: var(--primary-dark);
+  color: var(--text-color);
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.slash-item.loading,
+.slash-item.no-results {
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.slash-item.loading:hover,
+.slash-item.no-results:hover {
+  background-color: transparent;
 }
 
 .slash-toggle {

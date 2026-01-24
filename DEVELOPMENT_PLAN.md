@@ -139,6 +139,11 @@
   - `/compact` - 手動壓縮上下文
   - `/cost` - 查看使用費用
   - `/clear` - 清除對話（新對話）
+- [ ] **動態 Slash Commands 載入** 🔄
+  - 掃描 `~/.claude/skills/` 和 `.claude/skills/` 取得自定義 Skills
+  - 內建命令列表（對齊 Claude Code CLI）
+  - 斜線選單動態顯示所有可用命令
+  - 選中 Skill 後發送給 Claude CLI 執行
 - [x] **工作目錄管理** ✅
   - 顯示目前 Claude 工作目錄
   - 動態取得工作目錄（修復 yes-always 的 hardcoded 路徑）
@@ -159,9 +164,8 @@
   - `Escape` - 中斷請求 / 關閉選單
   - `Ctrl+Shift+C` / `Cmd+Shift+C` - 執行 /compact
 - [x] **Extended Thinking 切換** ✅ - 讓 Claude 花更多時間推理（💭 按鈕）
-- [ ] **目前讀取的檔案顯示** - 顯示 Claude 正在讀取/編輯的檔案 (即 Phase 4.7)
-- [ ] **終端輸出參考** - `@terminal:name` 參考終端輸出
-- [ ] **多對話管理** - 新標籤、新視窗開啟對話
+- [x] **目前讀取的檔案顯示** - 顯示 Claude 正在讀取/編輯的檔案 (即 Phase 4.7)
+- [x] **多對話管理** - 標籤頁切換多個對話
 
 ### Phase 4.7：IDE 整合（`/ide` 功能）✅ 完成
 

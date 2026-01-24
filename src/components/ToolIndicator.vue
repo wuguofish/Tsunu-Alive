@@ -1,6 +1,63 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import hljs from 'highlight.js';
+import { marked } from 'marked';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+
+// 複製狀態追蹤
+const copiedBlockId = ref<string | null>(null);
+
+// Block 內容展開狀態追蹤（預設全部摺疊）
+const expandedBlocks = ref<Set<string>>(new Set());
+
+// 切換 Block 展開狀態
+function toggleBlockExpand(blockId: string) {
+  if (expandedBlocks.value.has(blockId)) {
+    expandedBlocks.value.delete(blockId);
+  } else {
+    expandedBlocks.value.add(blockId);
+  }
+  // 觸發響應式更新
+  expandedBlocks.value = new Set(expandedBlocks.value);
+}
+
+// 檢查 Block 是否展開
+function isBlockExpanded(blockId: string): boolean {
+  return expandedBlocks.value.has(blockId);
+}
+
+// 檢查內容是否超過指定行數（預設 8 行）
+// 同時檢查行數和字元數，取較寬鬆的判斷
+function shouldShowExpand(content: string | undefined, maxLines: number = 8): boolean {
+  if (!content) return false;
+  const lineCount = content.split('\n').length;
+  // 超過指定行數，或者內容超過約 400 字元（約 8 行 x 50 字元）
+  return lineCount > maxLines || content.length > 400;
+}
+
+// 複製到剪貼簿
+async function copyToClipboard(text: string, blockId: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    copiedBlockId.value = blockId;
+    setTimeout(() => {
+      copiedBlockId.value = null;
+    }, 2000);
+  } catch (err) {
+    console.error('Failed to copy:', err);
+  }
+}
+
+// 在檔案總管中顯示檔案
+async function openFile(filePath: string) {
+  console.log('Revealing file:', filePath);
+  try {
+    await revealItemInDir(filePath);
+    console.log('File revealed successfully');
+  } catch (err) {
+    console.error('Failed to reveal file:', err);
+  }
+}
 
 // 已知的工具類型列表
 const KNOWN_TOOLS = [
@@ -178,6 +235,11 @@ function guessLanguage(filePath?: string): string {
 function toggleExpand() {
   isExpanded.value = !isExpanded.value;
 }
+
+// 渲染 Markdown（用於 Plan 內容）
+function renderMarkdown(content: string): string {
+  return marked.parse(content, { async: false }) as string;
+}
 </script>
 
 <template>
@@ -212,16 +274,41 @@ function toggleExpand() {
       <!-- Bash 工具：顯示輸入和輸出 -->
       <template v-if="type === 'Bash'">
         <div v-if="input" class="tool-block">
-          <div class="block-label">IN</div>
-          <pre class="block-content"><code v-html="highlightCode(input, 'bash')"></code></pre>
+          <div class="block-header">
+            <div class="block-label">IN</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'bash-in' }"
+              @click.stop="copyToClipboard(input, 'bash-in')"
+            >{{ copiedBlockId === 'bash-in' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('bash-in') && shouldShowExpand(input) }">
+            <pre class="block-content"><code v-html="highlightCode(input, 'bash')"></code></pre>
+            <button v-if="shouldShowExpand(input)" class="expand-btn" @click.stop="toggleBlockExpand('bash-in')">
+              {{ isBlockExpanded('bash-in') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
         <div v-if="output !== undefined" class="tool-block output">
-          <div class="block-label">OUT</div>
-          <div class="block-content">
-            <div v-if="exitCode !== undefined" class="exit-code" :class="{ error: exitCode !== 0 }">
-              Exit code {{ exitCode }}
+          <div class="block-header">
+            <div class="block-label">OUT</div>
+            <button
+              v-if="output"
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'bash-out' }"
+              @click.stop="copyToClipboard(output, 'bash-out')"
+            >{{ copiedBlockId === 'bash-out' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('bash-out') && shouldShowExpand(output) }">
+            <div class="block-content">
+              <div v-if="exitCode !== undefined" class="exit-code" :class="{ error: exitCode !== 0 }">
+                Exit code {{ exitCode }}
+              </div>
+              <pre v-if="output"><code>{{ output }}</code></pre>
             </div>
-            <pre v-if="output"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('bash-out')">
+              {{ isBlockExpanded('bash-out') ? '收合' : '展開' }}
+            </button>
           </div>
         </div>
       </template>
@@ -231,16 +318,41 @@ function toggleExpand() {
         <!-- 如果有 oldCode/newCode，顯示 side-by-side diff -->
         <div v-if="oldCode || newCode" class="diff-sidebyside">
           <div class="diff-panel old">
-            <pre><code v-html="highlightCode(oldCode || '', 'typescript')"></code></pre>
+            <div class="diff-panel-header">
+              <span>OLD</span>
+              <button
+                v-if="oldCode"
+                class="copy-btn copy-btn-small"
+                :class="{ copied: copiedBlockId === 'edit-old' }"
+                @click.stop="copyToClipboard(oldCode, 'edit-old')"
+              >{{ copiedBlockId === 'edit-old' ? '✔' : '❐' }}</button>
+            </div>
+            <pre><code v-html="highlightCode(oldCode || '', guessLanguage(path))"></code></pre>
           </div>
           <div class="diff-divider"></div>
           <div class="diff-panel new">
-            <pre><code v-html="highlightCode(newCode || '', 'typescript')"></code></pre>
+            <div class="diff-panel-header">
+              <span>NEW</span>
+              <button
+                v-if="newCode"
+                class="copy-btn copy-btn-small"
+                :class="{ copied: copiedBlockId === 'edit-new' }"
+                @click.stop="copyToClipboard(newCode, 'edit-new')"
+              >{{ copiedBlockId === 'edit-new' ? '✔' : '❐' }}</button>
+            </div>
+            <pre><code v-html="highlightCode(newCode || '', guessLanguage(path))"></code></pre>
           </div>
         </div>
         <!-- 如果只有 output（結果），顯示結果 -->
         <div v-else-if="output" class="tool-block output">
-          <div class="block-label">RESULT</div>
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'edit-result' }"
+              @click.stop="copyToClipboard(output, 'edit-result')"
+            >{{ copiedBlockId === 'edit-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
           <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
       </template>
@@ -248,19 +360,50 @@ function toggleExpand() {
       <!-- Read 工具：顯示讀取結果 -->
       <template v-if="type === 'Read'">
         <div v-if="output" class="tool-block output">
-          <div class="block-label">CONTENT</div>
-          <pre class="block-content"><code v-html="highlightCode(output, guessLanguage(path))"></code></pre>
+          <div class="block-header">
+            <div class="block-label">CONTENT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'read-content' }"
+              @click.stop="copyToClipboard(output, 'read-content')"
+            >{{ copiedBlockId === 'read-content' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('read-content') && shouldShowExpand(output) }">
+            <pre class="block-content"><code v-html="highlightCode(output, guessLanguage(path))"></code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('read-content')">
+              {{ isBlockExpanded('read-content') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
       <!-- Write 工具：顯示寫入內容 -->
       <template v-if="type === 'Write'">
         <div v-if="content" class="tool-block">
-          <div class="block-label">CONTENT</div>
-          <pre class="block-content"><code v-html="highlightCode(content, guessLanguage(path))"></code></pre>
+          <div class="block-header">
+            <div class="block-label">CONTENT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'write-content' }"
+              @click.stop="copyToClipboard(content, 'write-content')"
+            >{{ copiedBlockId === 'write-content' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('write-content') && shouldShowExpand(content) }">
+            <pre class="block-content"><code v-html="highlightCode(content, guessLanguage(path))"></code></pre>
+            <button v-if="shouldShowExpand(content)" class="expand-btn" @click.stop="toggleBlockExpand('write-content')">
+              {{ isBlockExpanded('write-content') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
         <div v-else-if="output" class="tool-block output">
-          <div class="block-label">RESULT</div>
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'write-result' }"
+              @click.stop="copyToClipboard(output, 'write-result')"
+            >{{ copiedBlockId === 'write-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
           <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
       </template>
@@ -268,12 +411,36 @@ function toggleExpand() {
       <!-- Task 工具：顯示 prompt -->
       <template v-if="type === 'Task'">
         <div v-if="prompt" class="tool-block">
-          <div class="block-label">PROMPT</div>
-          <pre class="block-content"><code>{{ prompt }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">PROMPT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'task-prompt' }"
+              @click.stop="copyToClipboard(prompt, 'task-prompt')"
+            >{{ copiedBlockId === 'task-prompt' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('task-prompt') && shouldShowExpand(prompt) }">
+            <pre class="block-content"><code>{{ prompt }}</code></pre>
+            <button v-if="shouldShowExpand(prompt)" class="expand-btn" @click.stop="toggleBlockExpand('task-prompt')">
+              {{ isBlockExpanded('task-prompt') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">RESULT</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'task-result' }"
+              @click.stop="copyToClipboard(output, 'task-result')"
+            >{{ copiedBlockId === 'task-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('task-result') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('task-result')">
+              {{ isBlockExpanded('task-result') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
@@ -283,32 +450,84 @@ function toggleExpand() {
           <span class="info-label">Task ID:</span> {{ taskId }}
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">OUTPUT</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">OUTPUT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'taskoutput-output' }"
+              @click.stop="copyToClipboard(output, 'taskoutput-output')"
+            >{{ copiedBlockId === 'taskoutput-output' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('taskoutput-output') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('taskoutput-output')">
+              {{ isBlockExpanded('taskoutput-output') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
       <!-- WebSearch 工具：顯示搜尋查詢 -->
       <template v-if="type === 'WebSearch'">
         <div v-if="query" class="tool-block">
-          <div class="block-label">QUERY</div>
+          <div class="block-header">
+            <div class="block-label">QUERY</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'websearch-query' }"
+              @click.stop="copyToClipboard(query, 'websearch-query')"
+            >{{ copiedBlockId === 'websearch-query' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
           <pre class="block-content"><code>{{ query }}</code></pre>
         </div>
         <div v-if="output !== undefined" class="tool-block output">
-          <div class="block-label">RESULT</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+            <button
+              v-if="output"
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'websearch-result' }"
+              @click.stop="copyToClipboard(output, 'websearch-result')"
+            >{{ copiedBlockId === 'websearch-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('websearch-result') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('websearch-result')">
+              {{ isBlockExpanded('websearch-result') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
       <!-- WebFetch 工具：顯示 URL -->
       <template v-if="type === 'WebFetch'">
         <div v-if="query" class="tool-block">
-          <div class="block-label">URL</div>
+          <div class="block-header">
+            <div class="block-label">URL</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'webfetch-url' }"
+              @click.stop="copyToClipboard(query, 'webfetch-url')"
+            >{{ copiedBlockId === 'webfetch-url' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
           <pre class="block-content"><code>{{ query }}</code></pre>
         </div>
         <div v-if="output !== undefined" class="tool-block output">
-          <div class="block-label">RESPONSE</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">RESPONSE</div>
+            <button
+              v-if="output"
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'webfetch-response' }"
+              @click.stop="copyToClipboard(output, 'webfetch-response')"
+            >{{ copiedBlockId === 'webfetch-response' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('webfetch-response') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('webfetch-response')">
+              {{ isBlockExpanded('webfetch-response') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
@@ -318,8 +537,20 @@ function toggleExpand() {
           <span class="info-label">in</span> {{ path }}
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">MATCHES</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">MATCHES</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'grep-matches' }"
+              @click.stop="copyToClipboard(output, 'grep-matches')"
+            >{{ copiedBlockId === 'grep-matches' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('grep-matches') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('grep-matches')">
+              {{ isBlockExpanded('grep-matches') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
@@ -329,8 +560,20 @@ function toggleExpand() {
           <span class="info-label">in</span> {{ path }}
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">FILES</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">FILES</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'glob-files' }"
+              @click.stop="copyToClipboard(output, 'glob-files')"
+            >{{ copiedBlockId === 'glob-files' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('glob-files') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('glob-files')">
+              {{ isBlockExpanded('glob-files') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
@@ -365,7 +608,14 @@ function toggleExpand() {
           </div>
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">ANSWER</div>
+          <div class="block-header">
+            <div class="block-label">ANSWER</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'ask-answer' }"
+              @click.stop="copyToClipboard(output, 'ask-answer')"
+            >{{ copiedBlockId === 'ask-answer' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
           <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
       </template>
@@ -378,8 +628,20 @@ function toggleExpand() {
           <span v-if="editMode" class="info-item"><span class="info-label">Mode:</span> {{ editMode }}</span>
         </div>
         <div v-if="newSource" class="tool-block">
-          <div class="block-label">SOURCE</div>
-          <pre class="block-content"><code v-html="highlightCode(newSource, 'python')"></code></pre>
+          <div class="block-header">
+            <div class="block-label">SOURCE</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'notebook-source' }"
+              @click.stop="copyToClipboard(newSource, 'notebook-source')"
+            >{{ copiedBlockId === 'notebook-source' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('notebook-source') && shouldShowExpand(newSource) }">
+            <pre class="block-content"><code v-html="highlightCode(newSource, 'python')"></code></pre>
+            <button v-if="shouldShowExpand(newSource)" class="expand-btn" @click.stop="toggleBlockExpand('notebook-source')">
+              {{ isBlockExpanded('notebook-source') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
@@ -389,8 +651,20 @@ function toggleExpand() {
           <span class="info-label">Shell ID:</span> {{ shellId }}
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">RESULT</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'killshell-result' }"
+              @click.stop="copyToClipboard(output, 'killshell-result')"
+            >{{ copiedBlockId === 'killshell-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('killshell-result') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('killshell-result')">
+              {{ isBlockExpanded('killshell-result') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
@@ -400,32 +674,127 @@ function toggleExpand() {
           <span class="info-label">Args:</span> {{ args }}
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">RESULT</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'skill-result' }"
+              @click.stop="copyToClipboard(output, 'skill-result')"
+            >{{ copiedBlockId === 'skill-result' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('skill-result') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('skill-result')">
+              {{ isBlockExpanded('skill-result') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
-      <!-- EnterPlanMode/ExitPlanMode 工具：狀態提示 -->
-      <template v-if="type === 'EnterPlanMode' || type === 'ExitPlanMode'">
+      <!-- EnterPlanMode 工具：進入計畫模式 -->
+      <template v-if="type === 'EnterPlanMode'">
         <div class="plan-mode-indicator">
-          <span v-if="type === 'EnterPlanMode'" class="plan-enter">📋 進入計畫模式</span>
-          <span v-else class="plan-exit">✅ 退出計畫模式</span>
+          <span class="plan-enter">📋 進入計畫模式</span>
+        </div>
+      </template>
+
+      <!-- ExitPlanMode 工具：退出計畫模式，顯示計畫內容 -->
+      <template v-if="type === 'ExitPlanMode'">
+        <div class="plan-mode-indicator">
+          <span class="plan-exit">✅ 退出計畫模式</span>
+        </div>
+        <!-- 顯示計畫檔案路徑 -->
+        <div v-if="rawInput?._planFilePath" class="tool-block plan-file-path">
+          <div class="block-header">
+            <div class="block-label">PLAN FILE</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'plan-filepath' }"
+              @click.stop="copyToClipboard(String(rawInput._planFilePath), 'plan-filepath')"
+            >{{ copiedBlockId === 'plan-filepath' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content plan-path-content">
+            <span
+              class="plan-path-text clickable"
+              @click.stop="openFile(String(rawInput._planFilePath))"
+              title="點擊開啟檔案"
+            >{{ rawInput._planFilePath }}</span>
+          </div>
+        </div>
+        <!-- 顯示遠端 Session -->
+        <div v-if="rawInput?.pushToRemote && rawInput?.remoteSessionUrl" class="tool-block plan-remote">
+          <div class="block-label">REMOTE SESSION</div>
+          <div class="block-content">
+            <a :href="rawInput.remoteSessionUrl as string" target="_blank" class="plan-link">
+              {{ rawInput.remoteSessionTitle || 'Claude.ai Session' }}
+            </a>
+          </div>
+        </div>
+        <!-- 顯示允許的操作 -->
+        <div v-if="rawInput?.allowedPrompts && (rawInput.allowedPrompts as any[]).length > 0" class="tool-block plan-prompts">
+          <div class="block-label">ALLOWED ACTIONS</div>
+          <ul class="plan-actions-list">
+            <li v-for="(prompt, index) in (rawInput.allowedPrompts as any[])" :key="index">
+              <span class="action-tool">{{ prompt.tool }}</span>: {{ prompt.prompt }}
+            </li>
+          </ul>
+        </div>
+        <!-- 顯示計畫內容（如果有的話） -->
+        <div v-if="output" class="tool-block plan-content">
+          <div class="block-header">
+            <div class="block-label">PLAN</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'plan-content' }"
+              @click.stop="copyToClipboard(output, 'plan-content')"
+            >{{ copiedBlockId === 'plan-content' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('plan-content') && shouldShowExpand(output) }">
+            <div class="block-content plan-markdown" v-html="renderMarkdown(output)"></div>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('plan-content')">
+              {{ isBlockExpanded('plan-content') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
 
       <!-- ========== 未知工具 Fallback ========== -->
       <template v-if="!isKnownTool">
         <div class="fallback-notice">
-          <span class="fallback-icon">❓</span>
+          <span class="fallback-icon">?</span>
           <span>未知工具類型</span>
         </div>
         <div v-if="rawInput && Object.keys(rawInput).length > 0" class="tool-block">
-          <div class="block-label">INPUT</div>
-          <pre class="block-content"><code>{{ formattedRawInput }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">INPUT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'fallback-input' }"
+              @click.stop="copyToClipboard(formattedRawInput, 'fallback-input')"
+            >{{ copiedBlockId === 'fallback-input' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('fallback-input') && shouldShowExpand(formattedRawInput) }">
+            <pre class="block-content"><code>{{ formattedRawInput }}</code></pre>
+            <button v-if="shouldShowExpand(formattedRawInput)" class="expand-btn" @click.stop="toggleBlockExpand('fallback-input')">
+              {{ isBlockExpanded('fallback-input') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
         <div v-if="output" class="tool-block output">
-          <div class="block-label">OUTPUT</div>
-          <pre class="block-content"><code>{{ output }}</code></pre>
+          <div class="block-header">
+            <div class="block-label">OUTPUT</div>
+            <button
+              class="copy-btn"
+              :class="{ copied: copiedBlockId === 'fallback-output' }"
+              @click.stop="copyToClipboard(output, 'fallback-output')"
+            >{{ copiedBlockId === 'fallback-output' ? '✔ 已複製' : '❐ 複製' }}</button>
+          </div>
+          <div class="block-content-container" :class="{ collapsed: !isBlockExpanded('fallback-output') && shouldShowExpand(output) }">
+            <pre class="block-content"><code>{{ output }}</code></pre>
+            <button v-if="shouldShowExpand(output)" class="expand-btn" @click.stop="toggleBlockExpand('fallback-output')">
+              {{ isBlockExpanded('fallback-output') ? '收合' : '展開' }}
+            </button>
+          </div>
         </div>
       </template>
     </div>
@@ -591,7 +960,9 @@ function toggleExpand() {
   padding: 8px 12px;
 }
 
-.block-content pre {
+/* 確保 pre 元素（無論是在 .block-content 內還是本身就是 .block-content）都能自動換行 */
+.block-content pre,
+pre.block-content {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-all;
@@ -601,6 +972,95 @@ function toggleExpand() {
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 0.85em;
   color: var(--text-color);
+}
+
+/* Block Content Container - 可展開/摺疊 */
+.block-content-container {
+  position: relative;
+}
+
+/* 摺疊時只限制內容高度，不影響展開按鈕 */
+.block-content-container.collapsed > .block-content,
+.block-content-container.collapsed > pre.block-content {
+  max-height: calc(1.5em * 8 + 16px); /* 8 行 + padding */
+  overflow: hidden;
+}
+
+/* 漸層遮罩放在 container 上，避免被 content 的 overflow 截斷 */
+.block-content-container.collapsed::before {
+  content: '';
+  position: absolute;
+  bottom: 30px; /* expand-btn 高度上方 */
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 展開按鈕 */
+.expand-btn {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.expand-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text-color);
+}
+
+/* Block Header 樣式 (label + copy button) */
+.block-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.block-header .block-label {
+  background: none;
+}
+
+.block-header .copy-btn {
+  position: static;
+  margin: 2px 4px;
+}
+
+/* 複製按鈕樣式 */
+.copy-btn {
+  background: #444;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s, background 0.2s;
+}
+
+.copy-btn:hover {
+  opacity: 1;
+  background: #666;
+}
+
+.copy-btn.copied {
+  background: #22c55e;
+  opacity: 1;
+}
+
+.copy-btn-small {
+  padding: 2px 6px;
+  font-size: 0.7rem;
 }
 
 .exit-code {
@@ -628,6 +1088,26 @@ function toggleExpand() {
   flex: 1;
   overflow-x: auto;
   min-width: 0;
+}
+
+.diff-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 0.75em;
+  font-weight: 600;
+  color: var(--text-muted);
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.diff-panel-header .copy-btn {
+  position: static;
+  opacity: 0.6;
+}
+
+.diff-panel-header .copy-btn:hover {
+  opacity: 1;
 }
 
 .diff-panel pre {
@@ -766,6 +1246,147 @@ function toggleExpand() {
 
 .plan-exit {
   color: #2ecc71;
+}
+
+/* ExitPlanMode 計畫內容樣式 */
+.plan-remote .block-content {
+  padding: 8px 12px;
+}
+
+.plan-link {
+  color: var(--primary-light, #6ba3e0);
+  text-decoration: none;
+}
+
+.plan-link:hover {
+  text-decoration: underline;
+}
+
+.plan-actions-list {
+  margin: 0;
+  padding: 8px 12px 8px 28px;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+.plan-actions-list li {
+  margin-bottom: 4px;
+}
+
+.action-tool {
+  font-family: monospace;
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+/* Plan Markdown 渲染樣式 */
+.plan-markdown {
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.plan-markdown :deep(h1),
+.plan-markdown :deep(h2),
+.plan-markdown :deep(h3) {
+  margin: 0.8em 0 0.4em;
+  color: var(--text-color);
+}
+
+.plan-markdown :deep(h1) { font-size: 1.3em; }
+.plan-markdown :deep(h2) { font-size: 1.15em; }
+.plan-markdown :deep(h3) { font-size: 1em; }
+
+.plan-markdown :deep(p) {
+  margin: 0.5em 0;
+}
+
+.plan-markdown :deep(ul),
+.plan-markdown :deep(ol) {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.plan-markdown :deep(li) {
+  margin: 0.25em 0;
+}
+
+.plan-markdown :deep(code) {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9em;
+}
+
+.plan-markdown :deep(pre) {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 8px 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.plan-markdown :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+
+.plan-markdown :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 0.9em;
+}
+
+.plan-markdown :deep(th),
+.plan-markdown :deep(td) {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.plan-markdown :deep(th) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.plan-markdown :deep(blockquote) {
+  margin: 0.5em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--primary-color, #3498db);
+  color: var(--text-muted);
+}
+
+/* 計畫檔案路徑樣式 */
+.plan-path-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.85em;
+}
+
+.plan-path-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.plan-path-text {
+  color: var(--primary-light, #6ba3e0);
+  word-break: break-all;
+}
+
+.plan-path-text.clickable {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.plan-path-text.clickable:hover {
+  color: #fff;
+  text-decoration-style: solid;
 }
 
 /* Fallback 樣式 */

@@ -50,10 +50,15 @@ async fn send_to_claude(
     allowed_tools: Option<Vec<String>>,
     permission_mode: Option<String>,
     extended_thinking: Option<bool>,
+    resume_session_id: Option<String>,
 ) -> Result<(), String> {
-    // 取得現有的 session_id
+    // 取得 session_id：優先使用傳入的 resume_session_id，否則使用當前進程的 session_id
     let process = state.claude_process.clone();
-    let session_id = claude::get_session_id(process.clone()).await;
+    let session_id = if resume_session_id.is_some() {
+        resume_session_id
+    } else {
+        claude::get_session_id(process.clone()).await
+    };
 
     // 執行 Claude CLI
     claude::run_claude(app, process, prompt, working_dir, session_id, allowed_tools, permission_mode, extended_thinking).await
@@ -100,6 +105,14 @@ pub struct FileItem {
     pub is_dir: bool,
 }
 
+/// Skill 項目（用於斜線選單）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillItem {
+    pub name: String,           // Skill 名稱（例如 "gget-analyzer"）
+    pub description: String,    // Skill 說明
+    pub source: String,         // 來源："builtin", "user", "project"
+}
+
 /// Session 項目（用於歷史對話列表）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionItem {
@@ -107,6 +120,34 @@ pub struct SessionItem {
     pub created_at: String,      // ISO 8601 格式
     pub last_modified: String,   // ISO 8601 格式
     pub summary: Option<String>, // 對話摘要（第一條訊息）
+}
+
+/// 歷史訊息項目（對應前端的 ChatItem）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum HistoryChatItem {
+    #[serde(rename = "text")]
+    Text { content: String },
+    #[serde(rename = "tool")]
+    Tool { tool: HistoryToolUse },
+}
+
+/// 工具使用記錄
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HistoryToolUse {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub input: Value,
+    pub result: Option<String>,
+}
+
+/// 歷史訊息（對應前端的 Message）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub items: Vec<HistoryChatItem>,
 }
 
 /// 列出指定目錄下的檔案和資料夾（用於 @-mention 自動完成）
@@ -182,14 +223,183 @@ fn list_files(
     Ok(items)
 }
 
-/// 計算專案路徑的 hash（用於定位 Claude CLI session 目錄）
-fn get_project_hash(working_dir: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+/// 從 SKILL.md 檔案中解析 name 和 description
+/// 格式：YAML frontmatter 在檔案開頭
+fn parse_skill_md(content: &str, fallback_name: &str) -> (String, String) {
+    let mut name = fallback_name.to_string();
+    let mut description = String::new();
 
-    let mut hasher = DefaultHasher::new();
-    working_dir.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    // 檢查是否有 YAML frontmatter（以 --- 開頭）
+    if content.starts_with("---") {
+        // 找到結束的 ---
+        if let Some(end_idx) = content[3..].find("---") {
+            let frontmatter = &content[3..3 + end_idx];
+
+            // 簡單解析 YAML（不用外部庫）
+            for line in frontmatter.lines() {
+                let line = line.trim();
+                if let Some(value) = line.strip_prefix("name:") {
+                    name = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                } else if let Some(value) = line.strip_prefix("description:") {
+                    description = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                }
+            }
+        }
+    }
+
+    // 如果沒有從 frontmatter 取得 description，嘗試從內容第一行取得
+    if description.is_empty() {
+        // 跳過 frontmatter，取得第一個非空行
+        let content_after_frontmatter = if content.starts_with("---") {
+            if let Some(end_idx) = content[3..].find("---") {
+                &content[3 + end_idx + 3..]
+            } else {
+                content
+            }
+        } else {
+            content
+        };
+
+        for line in content_after_frontmatter.lines() {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                description = line.chars().take(100).collect();
+                break;
+            }
+        }
+    }
+
+    (name, description)
+}
+
+/// 掃描指定目錄下的 skills
+fn scan_skills_in_dir(dir: &PathBuf, source: &str) -> Vec<SkillItem> {
+    let mut skills = Vec::new();
+
+    if !dir.exists() || !dir.is_dir() {
+        return skills;
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                let skill_md = path.join("SKILL.md");
+                if skill_md.exists() {
+                    let folder_name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    if let Ok(content) = fs::read_to_string(&skill_md) {
+                        let (name, description) = parse_skill_md(&content, &folder_name);
+                        skills.push(SkillItem {
+                            name,
+                            description,
+                            source: source.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    skills
+}
+
+/// 掃描所有可用的 Slash Commands（Skills）
+#[tauri::command]
+fn scan_skills(working_dir: Option<String>) -> Result<Vec<SkillItem>, String> {
+    let mut all_skills = Vec::new();
+
+    // 1. 內建命令（Claude Code CLI 固定的命令）
+    let builtin_commands = vec![
+        ("clear", "Clear conversation history"),
+        ("compact", "Compact conversation to save context"),
+        ("config", "Open settings interface"),
+        ("context", "Visualize context usage"),
+        ("cost", "Show token usage statistics"),
+        ("doctor", "Check installation health"),
+        ("exit", "Exit the REPL"),
+        ("export", "Export conversation"),
+        ("help", "Get usage help"),
+        ("init", "Initialize project with CLAUDE.md"),
+        ("mcp", "Manage MCP servers"),
+        ("memory", "Edit CLAUDE.md memory file"),
+        ("model", "Select AI model"),
+        ("permissions", "View/update permissions"),
+        ("plan", "Enter plan mode"),
+        ("rename", "Rename current session"),
+        ("resume", "Resume a previous conversation"),
+        ("rewind", "Rewind recent changes"),
+        ("stats", "Show usage statistics"),
+        ("status", "Show version and account info"),
+        ("tasks", "List background tasks"),
+        ("theme", "Change color theme"),
+        ("todos", "List TODO items"),
+        ("usage", "Show plan usage"),
+    ];
+
+    for (name, desc) in builtin_commands {
+        all_skills.push(SkillItem {
+            name: name.to_string(),
+            description: desc.to_string(),
+            source: "builtin".to_string(),
+        });
+    }
+
+    // 2. 使用者級 Skills（~/.claude/skills/）
+    if let Some(home) = dirs::home_dir() {
+        let user_skills_dir = home.join(".claude").join("skills");
+        let user_skills = scan_skills_in_dir(&user_skills_dir, "user");
+        all_skills.extend(user_skills);
+    }
+
+    // 3. 專案級 Skills（.claude/skills/）
+    if let Some(ref wd) = working_dir {
+        let project_skills_dir = PathBuf::from(wd).join(".claude").join("skills");
+        let project_skills = scan_skills_in_dir(&project_skills_dir, "project");
+        all_skills.extend(project_skills);
+    }
+
+    // 按名稱排序
+    all_skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(all_skills)
+}
+
+/// 將專案路徑轉換為 Claude CLI 的目錄名稱格式
+/// 例如：d:\game\tsunu_alive → d--game-tsunu-alive
+fn get_project_dir_name(working_dir: &str) -> String {
+    // 標準化路徑分隔符
+    let path = working_dir
+        .replace('\\', "/")
+        .replace(':', "")
+        .replace('_', "-");
+
+    // 分割路徑並重新組合
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if parts.is_empty() {
+        return "unknown".to_string();
+    }
+
+    // 第一個部分是磁碟機代號（如果有的話），用 -- 連接
+    // 其餘部分用 - 連接
+    let mut result = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            result.push_str(&part.to_lowercase());
+            result.push_str("--");
+        } else {
+            if i > 1 {
+                result.push('-');
+            }
+            result.push_str(&part.to_lowercase());
+        }
+    }
+
+    result
 }
 
 /// 取得 Claude CLI 的 sessions 目錄
@@ -198,12 +408,12 @@ fn get_claude_sessions_dir(working_dir: &str) -> Option<PathBuf> {
     let home = std::env::var_os(home_var)?;
     let home_path = PathBuf::from(home);
 
-    // Claude CLI 的專案資料存放在 ~/.claude/projects/[project-hash]/
-    let project_hash = get_project_hash(working_dir);
+    // Claude CLI 的專案資料存放在 ~/.claude/projects/[project-dir-name]/
+    let project_dir_name = get_project_dir_name(working_dir);
     let sessions_dir = home_path
         .join(".claude")
         .join("projects")
-        .join(&project_hash);
+        .join(&project_dir_name);
 
     if sessions_dir.exists() {
         Some(sessions_dir)
@@ -276,9 +486,10 @@ fn list_sessions(working_dir: String) -> Result<Vec<SessionItem>, String> {
                             .and_then(|m| m.get("content"))
                             .and_then(|c| c.as_str())
                             .map(|s| {
-                                // 截斷長文字
-                                if s.len() > 100 {
-                                    format!("{}...", &s[..100])
+                                // 截斷長文字（使用字元數而非 byte 數，避免切到 UTF-8 字元中間）
+                                let chars: Vec<char> = s.chars().collect();
+                                if chars.len() > 50 {
+                                    format!("{}...", chars[..50].iter().collect::<String>())
                                 } else {
                                     s.to_string()
                                 }
@@ -304,6 +515,238 @@ fn list_sessions(working_dir: String) -> Result<Vec<SessionItem>, String> {
     sessions.truncate(50);
 
     Ok(sessions)
+}
+
+/// 檢查文字是否為系統訊息（不應該顯示在對話中）
+fn is_system_message(text: &str) -> bool {
+    let trimmed = text.trim();
+
+    // 過濾 Claude CLI 內部訊息
+    trimmed.starts_with("Caveat:") ||
+    trimmed.starts_with("Unknown skill:") ||
+    trimmed.starts_with("[Request interrupted") ||
+    trimmed.starts_with("No response requested") ||
+    // 過濾 system-reminder 標籤
+    trimmed.starts_with("<system-reminder>") ||
+    trimmed.contains("</system-reminder>") ||
+    // 過濾其他系統標籤
+    trimmed.starts_with("<ide_") ||
+    trimmed.starts_with("<command-name>")
+}
+
+/// 載入指定 session 的歷史訊息
+#[tauri::command]
+fn load_session_history(
+    working_dir: String,
+    session_id: String,
+) -> Result<Vec<HistoryMessage>, String> {
+    let sessions_dir = match get_claude_sessions_dir(&working_dir) {
+        Some(dir) => dir,
+        None => return Err("Session directory not found".to_string()),
+    };
+
+    let session_file = sessions_dir.join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        return Err(format!("Session file not found: {}", session_id));
+    }
+
+    let content = fs::read_to_string(&session_file)
+        .map_err(|e| format!("Failed to read session file: {}", e))?;
+
+    let mut messages: Vec<HistoryMessage> = Vec::new();
+    let mut current_assistant_msg: Option<HistoryMessage> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let json: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // 跳過無效的 JSON 行
+        };
+
+        let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match event_type {
+            "user" => {
+                // 先儲存當前的 assistant 訊息（如果有的話）
+                if let Some(msg) = current_assistant_msg.take() {
+                    if !msg.items.is_empty() {
+                        messages.push(msg);
+                    }
+                }
+
+                // 解析 user 訊息內容
+                if let Some(content_array) = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    let mut user_text_content: Vec<String> = Vec::new();
+
+                    for content_item in content_array {
+                        let item_type = content_item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                        match item_type {
+                            "text" => {
+                                // 一般文字（user 訊息可能有多段 text）
+                                if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
+                                    // 過濾掉 IDE 相關的系統訊息
+                                    if !text.starts_with("<ide_") {
+                                        user_text_content.push(text.to_string());
+                                    }
+                                }
+                            }
+                            "tool_result" => {
+                                // 工具結果 - 需要更新之前的 assistant 訊息中的工具
+                                let tool_use_id = content_item.get("tool_use_id")
+                                    .and_then(|i| i.as_str())
+                                    .unwrap_or("");
+                                let result_content = content_item.get("content")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string());
+
+                                // 檢查 toolUseResult.filePath（ExitPlanMode 的計畫檔案路徑）
+                                let plan_file_path = json.get("toolUseResult")
+                                    .and_then(|r| r.get("filePath"))
+                                    .and_then(|p| p.as_str())
+                                    .map(|s| s.to_string());
+
+                                // 在之前的 messages 中找到對應的工具並更新結果
+                                for msg in messages.iter_mut().rev() {
+                                    if msg.role == "assistant" {
+                                        let mut found = false;
+                                        for item in &mut msg.items {
+                                            if let HistoryChatItem::Tool { tool } = item {
+                                                if tool.id == tool_use_id {
+                                                    tool.result = result_content.clone();
+                                                    // 如果有計畫檔案路徑，加入到 input 中
+                                                    if let Some(ref path) = plan_file_path {
+                                                        if let Some(input_obj) = tool.input.as_object_mut() {
+                                                            input_obj.insert("_planFilePath".to_string(), json!(path));
+                                                        }
+                                                    }
+                                                    found = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if found {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // 只有當有實際的文字內容時才新增 user 訊息（tool_result 不算）
+                    if !user_text_content.is_empty() {
+                        messages.push(HistoryMessage {
+                            role: "user".to_string(),
+                            items: vec![HistoryChatItem::Text {
+                                content: user_text_content.join("\n"),
+                            }],
+                        });
+                    }
+                } else if let Some(msg_content) = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                {
+                    // 舊格式：content 是字串
+                    messages.push(HistoryMessage {
+                        role: "user".to_string(),
+                        items: vec![HistoryChatItem::Text {
+                            content: msg_content.to_string(),
+                        }],
+                    });
+                }
+            }
+            "assistant" => {
+                // 先儲存當前的 assistant 訊息（如果有的話）
+                if let Some(msg) = current_assistant_msg.take() {
+                    if !msg.items.is_empty() {
+                        messages.push(msg);
+                    }
+                }
+
+                // 解析 assistant 訊息內容
+                if let Some(message) = json.get("message") {
+                    if let Some(content_array) = message.get("content").and_then(|c| c.as_array()) {
+                        let mut assistant_items: Vec<HistoryChatItem> = Vec::new();
+
+                        for content_item in content_array {
+                            let item_type = content_item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                            match item_type {
+                                "text" => {
+                                    if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
+                                        // 過濾系統訊息和空白文字
+                                        if !text.trim().is_empty() && !is_system_message(text) {
+                                            assistant_items.push(HistoryChatItem::Text {
+                                                content: text.to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                                "tool_use" => {
+                                    let tool_id = content_item.get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let tool_name = content_item.get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let input = content_item.get("input")
+                                        .cloned()
+                                        .unwrap_or(json!({}));
+
+                                    let tool = HistoryToolUse {
+                                        id: tool_id,
+                                        name: tool_name.clone(),
+                                        tool_type: tool_name,
+                                        input,
+                                        result: None,  // 結果會在後續的 user 訊息中填充
+                                    };
+
+                                    assistant_items.push(HistoryChatItem::Tool { tool });
+                                }
+                                // 忽略 thinking 等其他類型
+                                _ => {}
+                            }
+                        }
+
+                        // 如果這個 assistant 訊息有內容，創建訊息
+                        if !assistant_items.is_empty() {
+                            current_assistant_msg = Some(HistoryMessage {
+                                role: "assistant".to_string(),
+                                items: assistant_items,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 儲存最後一個 assistant 訊息
+    if let Some(msg) = current_assistant_msg.take() {
+        if !msg.items.is_empty() {
+            messages.push(msg);
+        }
+    }
+
+    // 只返回最後 200 筆訊息，避免歷史過長影響效能
+    const MAX_HISTORY_MESSAGES: usize = 200;
+    if messages.len() > MAX_HISTORY_MESSAGES {
+        messages = messages.split_off(messages.len() - MAX_HISTORY_MESSAGES);
+    }
+
+    Ok(messages)
 }
 
 /// 將工具加入專案級白名單的核心邏輯
@@ -383,6 +826,54 @@ async fn add_project_permission(
 }
 
 // ============================================================================
+// Tab Management Commands
+// ============================================================================
+
+/// 儲存標籤頁資料到 .claude/tabs.json
+#[tauri::command]
+async fn save_tabs(working_dir: String, data: Value) -> Result<(), String> {
+    let tabs_path = PathBuf::from(&working_dir)
+        .join(".claude")
+        .join("tabs.json");
+
+    // 確保 .claude 目錄存在
+    if let Some(parent) = tabs_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create .claude directory: {}", e))?;
+    }
+
+    // 寫入檔案
+    let content = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("Failed to serialize tabs data: {}", e))?;
+    fs::write(&tabs_path, content)
+        .map_err(|e| format!("Failed to write tabs file: {}", e))?;
+
+    eprintln!("💾 Tabs saved to {:?}", tabs_path);
+    Ok(())
+}
+
+/// 載入標籤頁資料從 .claude/tabs.json
+#[tauri::command]
+async fn load_tabs(working_dir: String) -> Result<Option<Value>, String> {
+    let tabs_path = PathBuf::from(&working_dir)
+        .join(".claude")
+        .join("tabs.json");
+
+    if !tabs_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&tabs_path)
+        .map_err(|e| format!("Failed to read tabs file: {}", e))?;
+
+    let data: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse tabs file: {}", e))?;
+
+    eprintln!("📂 Tabs loaded from {:?}", tabs_path);
+    Ok(Some(data))
+}
+
+// ============================================================================
 // IDE Server Commands
 // ============================================================================
 
@@ -404,6 +895,71 @@ async fn get_ide_context() -> Result<Option<ide_server::IdeContext>, String> {
     Ok(ide_server::get_ide_context().await)
 }
 
+// ============================================================================
+// Plan File Commands
+// ============================================================================
+
+/// 計畫檔案資訊
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlanFileInfo {
+    pub path: String,          // 完整路徑
+    pub name: String,          // 檔案名稱（不含副檔名）
+    pub modified_at: String,   // ISO 8601 格式
+}
+
+/// 取得最近的計畫檔案路徑
+/// 掃描 ~/.claude/plans/ 目錄，返回最近修改的 .md 檔案
+#[tauri::command]
+fn get_recent_plan_path() -> Result<Option<PlanFileInfo>, String> {
+    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
+    let plans_dir = home.join(".claude").join("plans");
+
+    if !plans_dir.exists() {
+        return Ok(None);
+    }
+
+    // 找到最近修改的 .md 檔案
+    let mut recent_file: Option<(PathBuf, std::time::SystemTime)> = None;
+
+    let entries = fs::read_dir(&plans_dir)
+        .map_err(|e| format!("Failed to read plans directory: {}", e))?;
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+
+        if path.extension().map_or(false, |ext| ext == "md") {
+            if let Ok(metadata) = fs::metadata(&path) {
+                if let Ok(modified) = metadata.modified() {
+                    if recent_file.as_ref().map_or(true, |(_, time)| modified > *time) {
+                        recent_file = Some((path, modified));
+                    }
+                }
+            }
+        }
+    }
+
+    match recent_file {
+        Some((path, modified_time)) => {
+            let name = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let modified_at = {
+                let datetime: chrono::DateTime<chrono::Local> = modified_time.into();
+                datetime.to_rfc3339()
+            };
+
+            Ok(Some(PlanFileInfo {
+                path: path.to_string_lossy().to_string(),
+                name,
+                modified_at,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -422,10 +978,15 @@ pub fn run() {
             add_project_permission,
             get_working_directory,
             list_files,
+            scan_skills,
             list_sessions,
+            load_session_history,
+            save_tabs,
+            load_tabs,
             start_ide_server,
             get_ide_status,
-            get_ide_context
+            get_ide_context,
+            get_recent_plan_path
         ])
         .setup(|_app| {
             // 啟動 IDE WebSocket Server
