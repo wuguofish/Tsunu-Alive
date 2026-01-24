@@ -458,58 +458,91 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
             let tool_result = json.get("toolUseResult")
                 .or_else(|| json.get("tool_use_result"));
 
-            if let Some(tool_result) = tool_result {
-                let tool_id = json.get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|item| item.get("tool_use_id"))
-                    .and_then(|id| id.as_str())
-                    .unwrap_or("")
-                    .to_string();
+            // 從 message.content 中提取 tool_use_id
+            let content_item = json.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first());
 
-                // 檢查是否是錯誤
-                let is_error = json.get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|item| item.get("is_error"))
-                    .and_then(|e| e.as_bool())
-                    .unwrap_or(false);
+            let tool_id = content_item
+                .and_then(|item| item.get("tool_use_id"))
+                .and_then(|id| id.as_str())
+                .unwrap_or("")
+                .to_string();
 
+            // 檢查是否是錯誤
+            let is_error = content_item
+                .and_then(|item| item.get("is_error"))
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
+
+            // 如果有 tool_id，生成 ToolResult 事件
+            // 即使沒有 toolUseResult 欄位也要處理（例如圖片讀取成功的情況）
+            if !tool_id.is_empty() {
                 // 取得結果內容
                 // 優先順序：
                 // 1. toolUseResult.filePath（ExitPlanMode 計畫檔案路徑）
                 // 2. toolUseResult.file.filePath（檔案相關工具）
-                // 3. message.content[0].content（一般文字結果）
-                // 4. toolUseResult.type（fallback）
-                let result = if let Some(file_path) = tool_result.get("filePath")
-                    .and_then(|p| p.as_str())
-                {
-                    // ExitPlanMode 的計畫檔案路徑
-                    format!("Your plan has been saved to: {}", file_path)
-                } else if let Some(file) = tool_result.get("file") {
-                    file.get("filePath")
+                // 3. message.content[0].content（一般文字結果，字串格式）
+                // 4. message.content[0].content（陣列格式，如圖片）- 標記為 "image"
+                // 5. toolUseResult.type（fallback）
+                // 6. "success"（最終 fallback）
+                let result = if let Some(tool_result) = tool_result {                    
+                    if let Some(file_path) = tool_result.get("filePath")
                         .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                } else if let Some(content) = json.get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|item| item.get("content"))
-                    .and_then(|c| c.as_str())
-                {
-                    content.to_string()
+                    {
+                        // ExitPlanMode 的計畫檔案路徑
+                        format!("Your plan has been saved to: {}", file_path)
+                    } else if let Some(file) = tool_result.get("file") {
+                        // 檢查是否有 filePath（一般檔案工具）
+                        if let Some(file_path) = file.get("filePath").and_then(|p| p.as_str()) {
+                            file_path.to_string()
+                        } else if file.get("base64").is_some() {
+                            // 圖片結果（有 base64 資料）
+                            "image".to_string()
+                        } else {
+                            "success".to_string()
+                        }
+                    } else if let Some(content) = content_item
+                        .and_then(|item| item.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
+                        content.to_string()
+                    } else {
+                        tool_result.get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("success")
+                            .to_string()
+                    }
                 } else {
-                    tool_result.get("type")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("unknown")
-                        .to_string()
+                    // 沒有 toolUseResult 欄位，嘗試從 message.content 取得結果
+                    if let Some(content) = content_item
+                        .and_then(|item| item.get("content"))
+                    {
+                        if let Some(content_str) = content.as_str() {
+                            content_str.to_string()
+                        } else if content.is_array() {
+                            // 陣列格式（如圖片結果）
+                            // 檢查是否是圖片
+                            if let Some(first_item) = content.as_array().and_then(|arr| arr.first()) {
+                                if first_item.get("type").and_then(|t| t.as_str()) == Some("image") {
+                                    "image".to_string()
+                                } else {
+                                    "success".to_string()
+                                }
+                            } else {
+                                "success".to_string()
+                            }
+                        } else {
+                            "success".to_string()
+                        }
+                    } else {
+                        "success".to_string()
+                    }
                 };
 
                 // 提取 Edit 工具的 structuredPatch（用於 VS Code 風格 Diff View）
-                let structured_patch = tool_result.get("structuredPatch").cloned();
+                let structured_patch = tool_result.and_then(|tr| tr.get("structuredPatch").cloned());
 
                 events.push(ClaudeEvent::ToolResult { tool_id, result, is_error, structured_patch });
             }

@@ -611,22 +611,61 @@ fn load_session_history(
                                 let tool_use_id = content_item.get("tool_use_id")
                                     .and_then(|i| i.as_str())
                                     .unwrap_or("");
-                                let result_content = content_item.get("content")
-                                    .and_then(|c| c.as_str())
-                                    .map(|s| s.to_string());
+
+                                // 取得工具結果（需要處理圖片等特殊格式）
+                                let tool_use_result = json.get("toolUseResult");
+                                let result_content: Option<String> = {
+                                    // 優先檢查 toolUseResult
+                                    if let Some(tur) = tool_use_result {
+                                        if let Some(file_path) = tur.get("filePath").and_then(|p| p.as_str()) {
+                                            // ExitPlanMode 的計畫檔案路徑
+                                            Some(format!("Your plan has been saved to: {}", file_path))
+                                        } else if let Some(file) = tur.get("file") {
+                                            // 檢查是否有 filePath 或 base64
+                                            if let Some(fp) = file.get("filePath").and_then(|p| p.as_str()) {
+                                                Some(fp.to_string())
+                                            } else if file.get("base64").is_some() {
+                                                // 圖片結果
+                                                Some("image".to_string())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }.or_else(|| {
+                                    // 從 content_item.content 取得
+                                    let content = content_item.get("content")?;
+                                    if let Some(s) = content.as_str() {
+                                        Some(s.to_string())
+                                    } else if content.is_array() {
+                                        // 陣列格式（如圖片）
+                                        let first = content.as_array()?.first()?;
+                                        if first.get("type").and_then(|t| t.as_str()) == Some("image") {
+                                            Some("image".to_string())
+                                        } else {
+                                            Some("success".to_string())
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                });
 
                                 // 提取 is_error 欄位（工具執行失敗時會有這個欄位）
                                 let is_error = content_item.get("is_error")
                                     .and_then(|e| e.as_bool());
 
                                 // 檢查 toolUseResult.filePath（ExitPlanMode 的計畫檔案路徑）
-                                let plan_file_path = json.get("toolUseResult")
+                                let plan_file_path = tool_use_result
                                     .and_then(|r| r.get("filePath"))
                                     .and_then(|p| p.as_str())
                                     .map(|s| s.to_string());
 
                                 // 提取 Edit 工具的 structuredPatch（VS Code 風格 Diff View）
-                                let structured_patch = json.get("toolUseResult")
+                                let structured_patch = tool_use_result
                                     .and_then(|r| r.get("structuredPatch"))
                                     .cloned();
 
@@ -954,6 +993,33 @@ fn save_temp_image(rgba_data: Vec<u8>, width: u32, height: u32) -> Result<String
     let mut writer = encoder.write_header()
         .map_err(|e| format!("Failed to write PNG header: {}", e))?;
     writer.write_image_data(&rgba_data)
+        .map_err(|e| format!("Failed to write PNG data: {}", e))?;
+
+    // 回傳完整路徑
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// 儲存剪貼簿圖片到臨時檔案（直接接收 PNG 資料，效能更好）
+#[tauri::command]
+fn save_temp_image_png(png_data: Vec<u8>) -> Result<String, String> {
+    use std::io::Write;
+
+    // 確保臨時目錄存在
+    let temp_dir = std::env::temp_dir().join("tsunu_alive");
+    if !temp_dir.exists() {
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+    }
+
+    // 產生唯一檔名
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    let filename = format!("clipboard_{}.png", timestamp);
+    let file_path = temp_dir.join(&filename);
+
+    // 直接寫入 PNG 資料（不需要重新編碼）
+    let mut file = fs::File::create(&file_path)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+    file.write_all(&png_data)
         .map_err(|e| format!("Failed to write PNG data: {}", e))?;
 
     // 回傳完整路徑
@@ -1290,6 +1356,7 @@ pub fn run() {
             add_to_session_whitelist,
             clear_session_whitelist,
             save_temp_image,
+            save_temp_image_png,
             cleanup_temp_image
         ])
         .setup(move |app| {

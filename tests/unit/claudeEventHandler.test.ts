@@ -265,6 +265,7 @@ describe('claudeEventHandler', () => {
         toolName: 'Edit',
         toolId: 'tool-789',
         input: { file_path: '/edit.txt' },
+        originalPrompt: '',  // state.lastPrompt 預設為空字串
       })
       expect(result.stateUpdates.avatarState).toBe('waiting')
       expect(result.stateUpdates.busyStatus).toBe('等待確認...')
@@ -324,12 +325,13 @@ describe('claudeEventHandler', () => {
         toolName: 'Edit',
         toolId: 'tool-123',
         input: { file_path: '/test.txt' },
+        originalPrompt: '',  // state.lastPrompt 預設為空字串
       })
     })
 
-    it('sets pendingPermission in plan mode (trusts Claude CLI event system)', () => {
-      // 信任 Claude CLI：收到 PermissionDenied 就表示需要用戶確認
-      // 在 plan 模式下，Claude CLI 只會對需要確認的工具發送 PermissionDenied
+    it('auto-skips ExitPlanMode in plan mode (meta tool, uses Hook for confirmation)', () => {
+      // ExitPlanMode 是 META_TOOL，PermissionDenied 會被自動跳過
+      // 用戶確認計畫是通過 Hook 機制（plan-approval-request 事件）觸發的
       const state = createDefaultState()
       state.editMode = 'plan'
 
@@ -342,12 +344,9 @@ describe('claudeEventHandler', () => {
 
       const result = handlePermissionDeniedEvent(event, state)
 
-      // 應該顯示確認對話框
-      expect(result.stateUpdates.pendingPermission).toEqual({
-        toolName: 'ExitPlanMode',
-        toolId: 'tool-exit-plan',
-        input: { plan: 'My implementation plan...' },
-      })
+      // ExitPlanMode 是 META_TOOL，會自動跳過
+      expect(result.stateUpdates.pendingPermission).toBeUndefined()
+      expect(result.stateUpdates.deniedToolsThisRequest?.has('ExitPlanMode')).toBe(true)
     })
 
     it('triggers stopBusyTextAnimation when setting pendingPermission', () => {
@@ -400,48 +399,57 @@ describe('claudeEventHandler', () => {
         expect(result.stateUpdates.deniedToolsThisRequest?.has('AskUserQuestion')).toBe(true)
       })
 
-      it('auto-allows Read tool without showing permission dialog', () => {
+      it('shows permission dialog for Read tool (not a meta tool)', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
           event_type: 'PermissionDenied',
           tool_name: 'Read',
           tool_id: 'tool-read-123',
+          input: { file_path: '/test.txt' },
         }
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        // Read 不是 META_TOOL，應該顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Read')
         expect(result.stateUpdates.deniedToolsThisRequest?.has('Read')).toBe(true)
       })
 
-      it('auto-allows Glob tool without showing permission dialog', () => {
+      it('shows permission dialog for Glob tool (not a meta tool)', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
           event_type: 'PermissionDenied',
           tool_name: 'Glob',
           tool_id: 'tool-glob-123',
+          input: { pattern: '**/*.ts' },
         }
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        // Glob 不是 META_TOOL，應該顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Glob')
         expect(result.stateUpdates.deniedToolsThisRequest?.has('Glob')).toBe(true)
       })
 
-      it('auto-allows Grep tool without showing permission dialog', () => {
+      it('shows permission dialog for Grep tool (not a meta tool)', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
           event_type: 'PermissionDenied',
           tool_name: 'Grep',
           tool_id: 'tool-grep-123',
+          input: { pattern: 'test' },
         }
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        // Grep 不是 META_TOOL，應該顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Grep')
         expect(result.stateUpdates.deniedToolsThisRequest?.has('Grep')).toBe(true)
       })
 
@@ -486,17 +494,20 @@ describe('claudeEventHandler', () => {
         expect(writeResult.stateUpdates.deniedToolsThisRequest?.has('TodoWrite')).toBe(true)
       })
 
-      it('auto-allows WebSearch and WebFetch without showing permission dialog', () => {
+      it('shows permission dialog for WebSearch and WebFetch (not meta tools)', () => {
         const state = createDefaultState()
 
         const searchEvent: ClaudeEvent = {
           event_type: 'PermissionDenied',
           tool_name: 'WebSearch',
           tool_id: 'tool-websearch',
+          input: { query: 'test' },
         }
 
         const result = handlePermissionDeniedEvent(searchEvent, state)
-        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        // WebSearch 不是 META_TOOL，應該顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeDefined()
+        expect(result.stateUpdates.pendingPermission?.toolName).toBe('WebSearch')
         expect(result.stateUpdates.deniedToolsThisRequest?.has('WebSearch')).toBe(true)
 
         const state2 = createDefaultState()
@@ -504,10 +515,13 @@ describe('claudeEventHandler', () => {
           event_type: 'PermissionDenied',
           tool_name: 'WebFetch',
           tool_id: 'tool-webfetch',
+          input: { url: 'https://example.com' },
         }
 
         const result2 = handlePermissionDeniedEvent(fetchEvent, state2)
-        expect(result2.stateUpdates.pendingPermission).toBeUndefined()
+        // WebFetch 不是 META_TOOL，應該顯示對話框
+        expect(result2.stateUpdates.pendingPermission).toBeDefined()
+        expect(result2.stateUpdates.pendingPermission?.toolName).toBe('WebFetch')
         expect(result2.stateUpdates.deniedToolsThisRequest?.has('WebFetch')).toBe(true)
       })
 
@@ -558,7 +572,7 @@ describe('claudeEventHandler', () => {
         expect(result.stateUpdates.pendingPermission?.toolName).toBe('Bash')
       })
 
-      it('still shows permission dialog for ExitPlanMode (requires user confirmation)', () => {
+      it('auto-allows ExitPlanMode without showing permission dialog (meta tool)', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
@@ -570,9 +584,10 @@ describe('claudeEventHandler', () => {
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        // ExitPlanMode 需要用戶確認計畫，不應該自動允許
-        expect(result.stateUpdates.pendingPermission).toBeDefined()
-        expect(result.stateUpdates.pendingPermission?.toolName).toBe('ExitPlanMode')
+        // ExitPlanMode 是 META_TOOL，會自動跳過
+        // 注意：ExitPlanMode 的確認對話框是由 Hook 機制（plan-approval-request）觸發的，不是 PermissionDenied
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
+        expect(result.stateUpdates.deniedToolsThisRequest?.has('ExitPlanMode')).toBe(true)
       })
     })
   })

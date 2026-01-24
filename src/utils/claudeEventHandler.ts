@@ -3,8 +3,6 @@
  * 提取自 App.vue，用於測試和重用
  */
 
-import { isAutoAllowTool } from '../constants/autoAllowTools';
-
 // structuredPatch 的 hunk 類型（Edit 工具的差異資訊）
 export interface DiffHunk {
   oldStart: number;
@@ -226,12 +224,36 @@ export function handleToolUseEvent(
   };
 }
 
-// AUTO_ALLOW_TOOLS 已移至 src/constants/autoAllowTools.ts
-// 這是單一真相來源，避免重複定義導致不同步
+/**
+ * 「元工具」- 這些工具本身就是與用戶互動或內部追蹤用，不應該需要權限確認
+ * 如果 Claude CLI 對這些工具發出 PermissionDenied，我們應該自動跳過（不顯示對話框）
+ *
+ * 注意：這與 AUTO_ALLOW_TOOLS（給 permission_server 用）不同！
+ * - META_TOOLS：前端自動跳過，不顯示對話框
+ * - AUTO_ALLOW_TOOLS：permission_server 自動回應 allow
+ */
+const META_TOOLS = [
+  'AskUserQuestion',  // 本身就是詢問用戶
+  'EnterPlanMode',    // 進入計畫模式
+  'ExitPlanMode',     // 退出計畫模式
+  'TodoWrite',        // 內部追蹤
+  'TodoRead',         // 內部追蹤
+  'Task',             // 子代理任務
+  'TaskOutput',       // 子代理任務輸出
+] as const;
+
+function isMetaTool(toolName: string): boolean {
+  return META_TOOLS.includes(toolName as typeof META_TOOLS[number]);
+}
 
 /**
  * 處理 PermissionDenied 事件
- * 注意：無論是 default/acceptEdits/bypassPermissions/plan 模式，收到 PermissionDenied 都表示需要用戶確認
+ *
+ * 邏輯：
+ * 1. 「元工具」（AskUserQuestion、EnterPlanMode 等）：自動跳過，不顯示對話框
+ * 2. 其他工具（包括 Read、Glob、Grep 等）：顯示對話框讓用戶確認
+ *
+ * 這樣既保留了元工具的自動處理，又確保只讀工具在特殊情況下（如讀取敏感路徑）可以讓用戶決定
  */
 export function handlePermissionDeniedEvent(
   event: ClaudeEvent,
@@ -241,11 +263,9 @@ export function handlePermissionDeniedEvent(
     return { stateUpdates: {}, actions: [] };
   }
 
-  // 檢查是否是不需要確認的工具（使用共用常數）
-  if (isAutoAllowTool(event.tool_name)) {
-    console.log(`🔓 Auto-allowing tool (legacy mode): ${event.tool_name}`);
-    // 自動把工具加入 deniedToolsThisRequest，這樣下次重新執行時會被允許
-    // 不設定 pendingPermission，不會顯示對話框
+  // 「元工具」自動跳過，不顯示對話框
+  if (isMetaTool(event.tool_name)) {
+    console.log(`🔓 Auto-skipping meta tool: ${event.tool_name}`);
     const deniedToolsThisRequest = new Set(state.deniedToolsThisRequest);
     deniedToolsThisRequest.add(event.tool_name);
     return {
@@ -254,6 +274,7 @@ export function handlePermissionDeniedEvent(
     };
   }
 
+  // 其他工具：顯示權限確認對話框
   const messages = [...state.messages];
   const currentToolUses = [...state.currentToolUses];
   const deniedToolsThisRequest = new Set(state.deniedToolsThisRequest);
@@ -265,8 +286,11 @@ export function handlePermissionDeniedEvent(
     messages.push(assistantMsg);
   }
 
-  // 加入工具使用記錄
-  const existingTool = assistantMsg.items.find(
+  // 加入或更新工具使用記錄
+  // 注意：收到 PermissionDenied 表示這個工具已經被 CLI 拒絕了
+  // 在非 Hook 模式下，CLI 會同時告訴 Claude API「權限被拒絕」
+  // 所以這個工具已經失敗了，需要標記為 isCancelled
+  let existingTool = assistantMsg.items.find(
     (item): item is { type: 'tool'; tool: ToolUseItem } =>
       item.type === 'tool' && item.tool.id === event.tool_id
   );
@@ -277,6 +301,8 @@ export function handlePermissionDeniedEvent(
       type: event.tool_name,
       name: event.tool_name,
       input: event.input || {},
+      isCancelled: true,  // 標記為已取消（權限被拒絕）
+      userResponse: 'Permission denied',
     };
 
     assistantMsg.items.push({ type: 'tool', tool: newTool });
@@ -284,6 +310,17 @@ export function handlePermissionDeniedEvent(
     if (!currentToolUses.find(t => t.id === event.tool_id)) {
       currentToolUses.push(newTool);
     }
+  } else {
+    // 更新已存在的工具
+    existingTool.tool.isCancelled = true;
+    existingTool.tool.userResponse = 'Permission denied';
+  }
+
+  // 同時更新 currentToolUses 中的工具
+  const toolInList = currentToolUses.find(t => t.id === event.tool_id);
+  if (toolInList) {
+    toolInList.isCancelled = true;
+    toolInList.userResponse = 'Permission denied';
   }
 
   // 累積被拒絕的工具
@@ -318,6 +355,9 @@ export function handlePermissionDeniedEvent(
 
 /**
  * 處理 ToolResult 事件
+ *
+ * 注意：權限允許後重新執行時，Claude CLI 可能會發送新的 tool_id，
+ * 所以如果找不到匹配的工具，會嘗試找最近一個沒有 result 的同類工具來更新。
  */
 export function handleToolResultEvent(
   event: ClaudeEvent,
@@ -331,7 +371,21 @@ export function handleToolResultEvent(
   const currentToolUses = [...state.currentToolUses];
 
   // 更新 currentToolUses
-  const tool = currentToolUses.find(t => t.id === event.tool_id);
+  let tool = currentToolUses.find(t => t.id === event.tool_id);
+
+  // 如果找不到匹配的工具，嘗試找最近一個沒有 result 的工具
+  // 這處理了權限允許後重新執行的情況（Claude CLI 可能會發送新的 tool_id）
+  if (!tool) {
+    // 從後往前找最近一個沒有 result 的工具
+    for (let i = currentToolUses.length - 1; i >= 0; i--) {
+      if (!currentToolUses[i].result && !currentToolUses[i].isCancelled) {
+        tool = currentToolUses[i];
+        console.log(`🔧 ToolResult: tool_id mismatch, updating last pending tool: ${tool.name}`);
+        break;
+      }
+    }
+  }
+
   if (tool) {
     // 如果用戶已經回答過這個工具（AskUserQuestion），保留用戶的回答
     if (!tool.userAnswered) {
@@ -349,10 +403,22 @@ export function handleToolResultEvent(
   // 更新 messages 中的工具
   const lastMsg = messages[messages.length - 1];
   if (lastMsg && lastMsg.role === 'assistant') {
-    const toolItem = lastMsg.items.find(
+    let toolItem = lastMsg.items.find(
       (item): item is { type: 'tool'; tool: ToolUseItem } =>
         item.type === 'tool' && item.tool.id === event.tool_id
     );
+
+    // 如果找不到匹配的工具，嘗試找最近一個沒有 result 的工具
+    if (!toolItem) {
+      for (let i = lastMsg.items.length - 1; i >= 0; i--) {
+        const item = lastMsg.items[i];
+        if (item.type === 'tool' && !item.tool.result && !item.tool.isCancelled) {
+          toolItem = item as { type: 'tool'; tool: ToolUseItem };
+          break;
+        }
+      }
+    }
+
     if (toolItem) {
       // 如果用戶已經回答過這個工具（AskUserQuestion），保留用戶的回答
       if (!toolItem.tool.userAnswered) {
