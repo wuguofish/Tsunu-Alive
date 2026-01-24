@@ -30,6 +30,7 @@ function createDefaultState(): AppState {
     contextUsage: null,
     contextInfo: null,
     lastPrompt: '',
+    availableSkills: [],
   }
 }
 

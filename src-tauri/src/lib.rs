@@ -320,43 +320,13 @@ fn scan_skills_in_dir(dir: &PathBuf, source: &str) -> Vec<SkillItem> {
 fn scan_skills(working_dir: Option<String>) -> Result<Vec<SkillItem>, String> {
     let mut all_skills = Vec::new();
 
-    // 1. 內建命令（Claude Code CLI 固定的命令）
-    let builtin_commands = vec![
-        ("clear", "Clear conversation history"),
-        ("compact", "Compact conversation to save context"),
-        ("config", "Open settings interface"),
-        ("context", "Visualize context usage"),
-        ("cost", "Show token usage statistics"),
-        ("doctor", "Check installation health"),
-        ("exit", "Exit the REPL"),
-        ("export", "Export conversation"),
-        ("help", "Get usage help"),
-        ("init", "Initialize project with CLAUDE.md"),
-        ("mcp", "Manage MCP servers"),
-        ("memory", "Edit CLAUDE.md memory file"),
-        ("model", "Select AI model"),
-        ("permissions", "View/update permissions"),
-        ("plan", "Enter plan mode"),
-        ("rename", "Rename current session"),
-        ("resume", "Resume a previous conversation"),
-        ("rewind", "Rewind recent changes"),
-        ("stats", "Show usage statistics"),
-        ("status", "Show version and account info"),
-        ("tasks", "List background tasks"),
-        ("theme", "Change color theme"),
-        ("todos", "List TODO items"),
-        ("usage", "Show plan usage"),
-    ];
+    // 注意：CLI 內建命令（clear, compact, export, init, memory, plan, rename, rewind, todos 等）
+    // 在 SDK 模式下都不支援，只會返回 "Unknown skill: xxx"
+    // 只有透過 Skill 工具呼叫的 Skills 才能在 SDK 模式下使用
+    // 這些 Skills 會在 init 事件的 slash_commands 中列出，由前端從事件中取得
+    // 這裡只掃描使用者自定義的 Skills
 
-    for (name, desc) in builtin_commands {
-        all_skills.push(SkillItem {
-            name: name.to_string(),
-            description: desc.to_string(),
-            source: "builtin".to_string(),
-        });
-    }
-
-    // 2. 使用者級 Skills（~/.claude/skills/）
+    // 1. 使用者級 Skills（~/.claude/skills/）
     if let Some(home) = dirs::home_dir() {
         let user_skills_dir = home.join(".claude").join("skills");
         let user_skills = scan_skills_in_dir(&user_skills_dir, "user");

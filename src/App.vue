@@ -94,6 +94,7 @@ interface SkillItem {
   source: 'builtin' | 'user' | 'project';
 }
 const allSkills = ref<SkillItem[]>([]);
+const availableSkills = ref<string[]>([]);  // 從 init 事件取得的可用 Skills
 const slashFilter = ref('');
 const skillsLoaded = ref(false);
 const mentionFilter = ref('');
@@ -108,6 +109,28 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 
 // 是否正在等待回應
 const isLoading = ref(false);
+
+// Toast 通知狀態
+const toastMessage = ref('');
+const toastVariant = ref<'info' | 'warning' | 'error'>('info');
+const toastVisible = ref(false);
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(message: string, variant: 'info' | 'warning' | 'error' = 'info') {
+  // 清除之前的計時器
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
+
+  toastMessage.value = message;
+  toastVariant.value = variant;
+  toastVisible.value = true;
+
+  // 4 秒後自動隱藏
+  toastTimer = setTimeout(() => {
+    toastVisible.value = false;
+  }, 4000);
+}
 
 // 阿宇風格忙碌狀態文字
 const uniThinkingTexts = [
@@ -261,6 +284,7 @@ interface IdeClient {
   id: string;
   name: string;
   connected_at: string;
+  workspace_path: string | null;  // 工作區路徑（用於過濾同專案 IDE）
 }
 
 interface IdeContext {
@@ -274,6 +298,7 @@ interface IdeContext {
   } | null;
   language_id: string | null;
   last_updated: string | null;
+  client_id: string | null;  // 來源客戶端 ID（用於判斷是哪個 IDE 發送的）
 }
 
 interface IdeServerStatus {
@@ -356,6 +381,7 @@ function getCurrentAppState(): AppState {
     contextUsage: contextUsage.value,
     contextInfo: contextInfo.value,
     lastPrompt: lastPrompt.value,
+    availableSkills: availableSkills.value,
   };
 }
 
@@ -376,6 +402,12 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
   if (stateUpdates.isLoading !== undefined) isLoading.value = stateUpdates.isLoading;
   if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
   if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
+  if (stateUpdates.availableSkills !== undefined) {
+    availableSkills.value = stateUpdates.availableSkills;
+    // 重新載入 skills（合併 init 事件的 skills 和自訂 skills）
+    skillsLoaded.value = false;
+    loadSkills();
+  }
 
   // 執行副作用動作
   for (const action of actions) {
@@ -397,6 +429,9 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
           role: 'assistant',
           items: [{ type: 'text', content: `*皺眉* 抱歉，出了點問題：${action.message}` }]
         });
+        break;
+      case 'showToast':
+        showToast(action.message, action.variant || 'info');
         break;
     }
   }
@@ -910,19 +945,63 @@ async function sendMessage() {
   const content = userInput.value.trim();
   if (!content || isLoading.value) return;
 
-  // 組合最終 prompt：文字 + 圖片路徑
+  // 組合最終 prompt：IDE 選取 + 文字 + 圖片路徑
   let finalContent = content;
+
+  // 自動附加 IDE 選取內容（如果有的話）
+  // 只有當來源 IDE 的 workspace_path 與目前工作目錄一致時才附加
+  const ideCtx = ideStatus.value?.current_context;
+  let selectedText = ideCtx?.selected_text;
+
+  // 檢查來源 IDE 是否為同專案
+  if (selectedText && selectedText.trim() && ideCtx?.client_id) {
+    const sourceClient = ideStatus.value?.connected_clients?.find(
+      c => c.id === ideCtx.client_id
+    );
+
+    // 如果找到來源 client 且有 workspace_path，檢查是否為同專案
+    if (sourceClient?.workspace_path && workingDir.value) {
+      const clientWorkspace = sourceClient.workspace_path.toLowerCase().replace(/\\/g, '/');
+      const currentDir = workingDir.value.toLowerCase().replace(/\\/g, '/');
+
+      // 不是同專案則不附加
+      const isSameProject = currentDir === clientWorkspace ||
+                           currentDir.startsWith(clientWorkspace + '/') ||
+                           clientWorkspace.startsWith(currentDir + '/');
+      if (!isSameProject) {
+        selectedText = null;
+      }
+    }
+  }
+
+  if (selectedText && selectedText.trim()) {
+    const filePath = ideCtx?.file_path || 'unknown';
+    const selection = ideCtx?.selection;
+    let lineInfo = '';
+    if (selection) {
+      const startLine = selection.start_line + 1;
+      const endLine = selection.end_line + 1;
+      lineInfo = startLine === endLine ? `line ${startLine}` : `lines ${startLine} to ${endLine}`;
+    }
+    // 用 <ide_selection> 標籤包裹，讓 Claude 知道這是來自 IDE 的選取
+    finalContent = `<ide_selection>The user selected ${lineInfo} from ${filePath}:\n${selectedText}</ide_selection>\n\n${content}`;
+  }
+
   if (attachedImages.value.length > 0) {
     // 附加圖片路徑到 prompt
     const imagePaths = attachedImages.value.map(img => img.path).join(' ');
-    finalContent = `${content} ${imagePaths}`;
+    finalContent = `${finalContent} ${imagePaths}`;
   }
 
   // 記住這次的 prompt（用於權限確認後重新執行）
   lastPrompt.value = finalContent;
 
-  // 加入使用者訊息（顯示用，包含圖片標記）
+  // 加入使用者訊息（顯示用，包含圖片和 IDE 選取標記）
   let displayContent = content;
+  if (selectedText && selectedText.trim()) {
+    const fileName = ideCtx?.file_path?.split(/[\\/]/).pop() || 'file';
+    displayContent = `[IDE: ${fileName}]\n${content}`;
+  }
   if (attachedImages.value.length > 0) {
     displayContent += `\n[附加 ${attachedImages.value.length} 張圖片]`;
   }
@@ -1349,25 +1428,81 @@ function stopIdeStatusPolling() {
   }
 }
 
+// 過濾同專案的 IDE 連接
+// 只顯示 workspace_path 包含當前工作目錄的 IDE，或未報告 workspace 的 IDE（向後相容）
+const filteredIdeClients = computed(() => {
+  if (!ideStatus.value?.connected_clients) return [];
+  if (!workingDir.value) return ideStatus.value.connected_clients;
+
+  const currentDir = workingDir.value.toLowerCase().replace(/\\/g, '/');
+
+  return ideStatus.value.connected_clients.filter(client => {
+    // 未報告 workspace 的客戶端預設顯示（向後相容）
+    if (!client.workspace_path) return true;
+
+    // 正規化路徑比較
+    const clientWorkspace = client.workspace_path.toLowerCase().replace(/\\/g, '/');
+
+    // 檢查是否為同一個專案（路徑相同或其中一個是另一個的子目錄）
+    return currentDir === clientWorkspace ||
+           currentDir.startsWith(clientWorkspace + '/') ||
+           clientWorkspace.startsWith(currentDir + '/');
+  });
+});
+
 // 計算 IDE 連接狀態文字
 const ideConnectionText = computed(() => {
   if (!ideStatus.value) return 'IDE: —';
   if (!ideStatus.value.running) return 'IDE: Off';
-  const clientCount = ideStatus.value.connected_clients.length;
-  if (clientCount === 0) return 'IDE: Waiting';
-  if (clientCount === 1) return `IDE: ${ideStatus.value.connected_clients[0].name}`;
-  return `IDE: ${clientCount} connected`;
+  const clients = filteredIdeClients.value;
+  if (clients.length === 0) return 'IDE: Waiting';
+  if (clients.length === 1) return `IDE: ${clients[0].name}`;
+  return `IDE: ${clients.length} connected`;
 });
 
-// 計算 IDE 當前 context 顯示
+// 檢查 context 來源是否為同專案的 IDE
+const isContextFromSameProject = computed(() => {
+  const ctx = ideStatus.value?.current_context;
+  if (!ctx?.client_id) return true;  // 未知來源預設顯示（向後相容）
+  if (!workingDir.value) return true;
+
+  const sourceClient = ideStatus.value?.connected_clients?.find(
+    c => c.id === ctx.client_id
+  );
+
+  // 找不到來源 client 或未報告 workspace 則預設顯示
+  if (!sourceClient?.workspace_path) return true;
+
+  const clientWorkspace = sourceClient.workspace_path.toLowerCase().replace(/\\/g, '/');
+  const currentDir = workingDir.value.toLowerCase().replace(/\\/g, '/');
+
+  return currentDir === clientWorkspace ||
+         currentDir.startsWith(clientWorkspace + '/') ||
+         clientWorkspace.startsWith(currentDir + '/');
+});
+
+// 計算 IDE 當前 context 顯示（類似 CLI 格式：In xxx.py, N lines selected）
+// 只有同專案的 IDE 才顯示
 const ideContextDisplay = computed(() => {
+  if (!isContextFromSameProject.value) return null;
   if (!ideStatus.value?.current_context?.file_path) return null;
   const ctx = ideStatus.value.current_context;
   const fileName = ctx.file_path?.split(/[\\/]/).pop() || '';
-  if (ctx.selection) {
-    return `${fileName}:${ctx.selection.start_line + 1}`;
-  }
-  return fileName;
+  return `In ${fileName}`;
+});
+
+// 計算 IDE 選取狀態（顯示選取了幾行）
+// 只有同專案的 IDE 才顯示
+const ideSelectionDisplay = computed(() => {
+  if (!isContextFromSameProject.value) return null;
+  const ctx = ideStatus.value?.current_context;
+  if (!ctx?.selected_text || !ctx.selected_text.trim()) return null;
+  if (!ctx.selection) return 'selected';
+
+  const startLine = ctx.selection.start_line;
+  const endLine = ctx.selection.end_line;
+  const lineCount = endLine - startLine + 1;
+  return lineCount === 1 ? '1 line selected' : `${lineCount} lines selected`;
 });
 
 // 插入 IDE context 參考到輸入框
@@ -1418,12 +1553,28 @@ async function loadSkills() {
   if (skillsLoaded.value) return;
 
   try {
-    const skills = await invoke<SkillItem[]>('scan_skills', {
+    // 從 Rust 掃描自訂 skills（~/.claude/skills/ 和 .claude/skills/）
+    const customSkills = await invoke<SkillItem[]>('scan_skills', {
       workingDir: workingDir.value
     });
-    allSkills.value = skills;
+
+    // 從 init 事件取得的 skills（Claude CLI 提供的）
+    const initSkills: SkillItem[] = availableSkills.value.map(name => ({
+      name,
+      description: '',  // init 事件沒有提供描述
+      source: 'builtin' as const,
+    }));
+
+    // 合併：init skills + custom skills（去重）
+    const customNames = new Set(customSkills.map(s => s.name));
+    const mergedSkills = [
+      ...initSkills.filter(s => !customNames.has(s.name)),  // 排除已在自訂中的
+      ...customSkills,
+    ];
+
+    allSkills.value = mergedSkills;
     skillsLoaded.value = true;
-    console.log('📋 Loaded skills:', skills.length);
+    console.log('📋 Loaded skills:', mergedSkills.length, '(init:', initSkills.length, ', custom:', customSkills.length, ')');
   } catch (error) {
     console.error('Failed to load skills:', error);
   }
@@ -2030,7 +2181,7 @@ async function interruptRequest() {
                   :isRunning="!item.tool.result && !item.tool.isCancelled"
                   :isCancelled="item.tool.isCancelled"
                   :userResponse="item.tool.userResponse"
-                  :ideConnected="(ideStatus?.connected_clients?.length ?? 0) > 0"
+                  :ideConnected="filteredIdeClients.length > 0"
                 />
               </div>
 
@@ -2180,20 +2331,17 @@ async function interruptRequest() {
           <button
             class="status-btn ide-status"
             :class="{
-              connected: (ideStatus?.connected_clients?.length ?? 0) > 0,
-              waiting: ideStatus?.running && (ideStatus?.connected_clients?.length ?? 0) === 0,
+              connected: filteredIdeClients.length > 0,
+              waiting: ideStatus?.running && filteredIdeClients.length === 0,
               off: !ideStatus?.running
             }"
             :title="ideStatus?.running ? `WebSocket port ${ideStatus?.port}` : 'IDE Server not running'"
           >
             <span class="ide-icon">🔗</span>
             <span class="ide-text">{{ ideConnectionText }}</span>
-            <span
-              v-if="ideContextDisplay"
-              class="ide-context clickable"
-              @click.stop="insertIdeContextReference"
-              title="點擊插入檔案參考"
-            >{{ ideContextDisplay }}</span>
+            <!-- IDE 選取狀態（類似 CLI 格式，點擊可插入 @mention） -->
+            <span v-if="ideContextDisplay" class="ide-context clickable" @click.stop="insertIdeContextReference" title="點擊插入檔案參考">{{ ideContextDisplay }}</span>
+            <span v-if="ideSelectionDisplay" class="ide-selection">{{ ideSelectionDisplay }}</span>
           </button>
           <button class="status-btn context-usage" v-if="contextUsage"
             :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
@@ -2286,6 +2434,14 @@ async function interruptRequest() {
       </div>
 
     </div>
+
+    <!-- Toast 通知 -->
+    <Transition name="toast">
+      <div v-if="toastVisible" :class="['toast', `toast-${toastVariant}`]">
+        <span class="toast-message">{{ toastMessage }}</span>
+        <button class="toast-close" @click="toastVisible = false">&times;</button>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -2897,20 +3053,27 @@ textarea:disabled {
 .ide-context {
   font-family: monospace;
   font-size: 0.75rem;
-  background-color: rgba(46, 204, 113, 0.2);
-  padding: 1px 6px;
-  border-radius: 3px;
-  margin-left: 4px;
+  color: var(--text-muted);
+  margin-left: 8px;
 }
 
 .ide-context.clickable {
   cursor: pointer;
-  transition: all 0.15s;
+  transition: opacity 0.15s;
 }
 
 .ide-context.clickable:hover {
-  background-color: rgba(46, 204, 113, 0.4);
-  transform: scale(1.05);
+  opacity: 0.7;
+}
+
+.ide-selection {
+  font-family: monospace;
+  font-size: 0.75rem;
+  background-color: rgba(46, 204, 113, 0.2);
+  color: rgba(46, 204, 113, 0.9);
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 4px;
 }
 
 @keyframes ide-connected {
@@ -3205,5 +3368,67 @@ textarea:disabled {
   background: var(--text-muted);
 }
 
+/* Toast 通知 */
+.toast {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 20px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  max-width: 80%;
+}
+
+.toast-info {
+  background-color: var(--primary-color);
+  color: #fff;
+}
+
+.toast-warning {
+  background-color: #f39c12;
+  color: #000;
+}
+
+.toast-error {
+  background-color: #e74c3c;
+  color: #fff;
+}
+
+.toast-message {
+  flex: 1;
+  font-size: 0.9rem;
+}
+
+.toast-close {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 0;
+  line-height: 1;
+}
+
+.toast-close:hover {
+  opacity: 1;
+}
+
+/* Toast 動畫 */
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
+}
 
 </style>

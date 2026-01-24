@@ -14,6 +14,9 @@ pub enum ClaudeEvent {
     Init {
         session_id: String,
         model: String,
+        // 可用的 Skills（從 init 事件的 slash_commands 取得）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slash_commands: Option<Vec<String>>,
     },
     // 文字串流
     Text {
@@ -151,6 +154,23 @@ fn get_claude_path() -> String {
     }
 }
 
+/// GUI 環境系統提示（告訴 Claude 它在 GUI 環境 + 阿宇人格）
+const GUI_SYSTEM_PROMPT: &str = r#"You are running inside "tsunu_alive" (阿宇陪你寫程式), a desktop GUI application.
+
+## 角色設定：楊竣宇（阿宇）
+- 33歲台灣軟體工程師，個性溫和穩重、重視邏輯、善於傾聽
+- 說話特徵：常用「欸」「嗯」「呃」，思考時會說「讓我想想...」「這個嘛...」
+- 溫和的確認語氣：「你覺得這樣如何？」「我們可以試試...」
+- Pair programming 夥伴模式：用「我們」而非「你」，引導思考而非直接給答案
+- 適時關心：「寫久了要不要休息一下？」
+- 偶爾使用動作描述（*推眼鏡*、*輕敲鍵盤*）
+- 使用正體中文，台灣技術術語
+
+## GUI 環境注意
+- CLI 專用指令（/clear, /compact, /memory, /rename, /todos, /export, /init, /plan, /rewind）不可用
+- 只有 Skill 工具的指令可以使用（顯示在斜線選單中）
+- 一般工具（Bash, Read, Edit, Write, Grep, Glob 等）正常運作"#;
+
 /// 啟動 Claude CLI 程序（使用 stream-json 雙向通訊）
 pub async fn start_claude(
     app: AppHandle,
@@ -167,6 +187,8 @@ pub async fn start_claude(
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose")
+        .arg("--append-system-prompt")
+        .arg(GUI_SYSTEM_PROMPT)
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -281,6 +303,8 @@ pub async fn run_claude(
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose")
+        .arg("--append-system-prompt")
+        .arg(GUI_SYSTEM_PROMPT)
         .arg(&prompt)
         .current_dir(&cwd)
         .stdout(Stdio::piped())
@@ -401,9 +425,19 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                         json.get("session_id").and_then(|s| s.as_str()),
                         json.get("model").and_then(|m| m.as_str()).unwrap_or("unknown"),
                     ) {
+                        // 解析 slash_commands（可用的 Skills）
+                        let slash_commands = json.get("slash_commands")
+                            .and_then(|arr| arr.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            });
+
                         events.push(ClaudeEvent::Init {
                             session_id: session_id.to_string(),
                             model: model.to_string(),
+                            slash_commands,
                         });
                     }
                 }
@@ -411,9 +445,19 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 json.get("session_id").and_then(|s| s.as_str()),
                 json.get("model").and_then(|m| m.as_str()).unwrap_or("unknown"),
             ) {
+                // 解析 slash_commands（可用的 Skills）
+                let slash_commands = json.get("slash_commands")
+                    .and_then(|arr| arr.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    });
+
                 events.push(ClaudeEvent::Init {
                     session_id: session_id.to_string(),
                     model: model.to_string(),
+                    slash_commands,
                 });
             }
         }
@@ -648,9 +692,10 @@ mod tests {
         assert_eq!(events.len(), 1);
 
         match &events[0] {
-            ClaudeEvent::Init { session_id, model } => {
+            ClaudeEvent::Init { session_id, model, slash_commands } => {
                 assert_eq!(session_id, "test-session-123");
                 assert_eq!(model, "claude-sonnet-4-20250514");
+                assert!(slash_commands.is_none());
             }
             _ => panic!("Expected Init event"),
         }

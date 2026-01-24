@@ -17,6 +17,8 @@ export interface ClaudeEvent {
   event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied';
   session_id?: string;
   model?: string;
+  // 可用的 Skills（Init 事件）
+  slash_commands?: string[];
   text?: string;
   tool_name?: string;
   tool_id?: string;
@@ -97,6 +99,8 @@ export interface AppState {
   contextInfo: ContextInfo | null;
   // 最後一次用戶主動發起的請求（用於 fallback 模式重新執行）
   lastPrompt: string;
+  // 可用的 Skills（從 init 事件取得）
+  availableSkills: string[];
 }
 
 // 事件處理結果
@@ -110,7 +114,8 @@ export type EventAction =
   | { type: 'scrollToBottom' }
   | { type: 'stopBusyTextAnimation' }
   | { type: 'startCompleteTimer' }
-  | { type: 'addErrorMessage'; message: string };
+  | { type: 'addErrorMessage'; message: string }
+  | { type: 'showToast'; message: string; variant?: 'info' | 'warning' | 'error' };
 
 /**
  * 處理 Init 事件
@@ -128,6 +133,10 @@ export function handleInitEvent(
   }
   if (event.model) {
     stateUpdates.currentModel = event.model;
+  }
+  // 更新可用的 Skills（從 init 事件的 slash_commands 取得）
+  if (event.slash_commands) {
+    stateUpdates.availableSkills = event.slash_commands;
   }
 
   return { stateUpdates, actions: [] };
@@ -456,6 +465,11 @@ export function handleCompleteEvent(
     streamingText: '',
   };
 
+  const actions: EventAction[] = [
+    { type: 'stopBusyTextAnimation' },
+    { type: 'startCompleteTimer' },
+  ];
+
   // 更新 context 使用量資訊
   if (event.context_window_used_percent !== undefined) {
     stateUpdates.contextUsage = Math.round(event.context_window_used_percent);
@@ -467,13 +481,20 @@ export function handleCompleteEvent(
     };
   }
 
-  return {
-    stateUpdates,
-    actions: [
-      { type: 'stopBusyTextAnimation' },
-      { type: 'startCompleteTimer' },
-    ],
-  };
+  // 檢測 "Unknown skill: xxx" - CLI-only 命令提示
+  if (event.result) {
+    const unknownSkillMatch = event.result.match(/^Unknown skill:\s*(\w+)/);
+    if (unknownSkillMatch) {
+      const skillName = unknownSkillMatch[1];
+      actions.push({
+        type: 'showToast',
+        message: `/${skillName} 是 CLI 專用指令，在此介面無法使用`,
+        variant: 'warning',
+      });
+    }
+  }
+
+  return { stateUpdates, actions };
 }
 
 /**

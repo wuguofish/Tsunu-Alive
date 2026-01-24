@@ -106,14 +106,16 @@ function connect() {
             updateStatusBar('connected');
             vscode.window.showInformationMessage('🔗 已連接到 Tsunu Alive！');
 
-            // 發送 hello
+            // 發送 hello（包含 workspace 路徑，用於過濾同專案的 IDE）
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
             sendMessage({
                 jsonrpc: '2.0',
                 id: ++messageId,
                 method: 'client/hello',
                 params: {
                     name: 'VS Code',
-                    version: vscode.version
+                    version: vscode.version,
+                    workspacePath: workspaceFolder?.uri.fsPath
                 }
             });
 

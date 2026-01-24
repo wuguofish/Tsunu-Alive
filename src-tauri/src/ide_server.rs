@@ -51,6 +51,8 @@ pub struct IdeContext {
     pub diagnostics: Vec<Diagnostic>,
     /// 最後更新時間
     pub last_updated: Option<String>,
+    /// 來源客戶端 ID（用於判斷是哪個 IDE 發送的）
+    pub client_id: Option<String>,
 }
 
 /// 連接的客戶端資訊
@@ -59,6 +61,8 @@ pub struct ConnectedClient {
     pub id: String,
     pub name: String,  // IDE 名稱，如 "VS Code", "PyCharm"
     pub connected_at: String,
+    /// 工作區路徑（用於過濾同專案的 IDE）
+    pub workspace_path: Option<String>,
 }
 
 /// IDE Server 狀態
@@ -226,6 +230,7 @@ async fn handle_connection(
         id: client_id.clone(),
         name: "Unknown IDE".to_string(),
         connected_at: chrono::Utc::now().to_rfc3339(),
+        workspace_path: None,
     };
     clients.write().await.insert(client_id.clone(), client.clone());
     let _ = event_tx.send(IdeServerEvent::ClientConnected(client));
@@ -310,11 +315,16 @@ async fn handle_message(
         // 客戶端 hello - 更新客戶端資訊
         "client/hello" => {
             if let Some(params) = request.params {
-                if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                    let mut clients_guard = clients.write().await;
-                    if let Some(client) = clients_guard.get_mut(client_id) {
+                let mut clients_guard = clients.write().await;
+                if let Some(client) = clients_guard.get_mut(client_id) {
+                    if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
                         client.name = name.to_string();
-                        println!("🏷️ 客戶端識別為: {}", name);
+                    }
+                    if let Some(workspace) = params.get("workspacePath").and_then(|v| v.as_str()) {
+                        client.workspace_path = Some(workspace.to_string());
+                        println!("🏷️ 客戶端識別為: {} (workspace: {})", client.name, workspace);
+                    } else {
+                        println!("🏷️ 客戶端識別為: {}", client.name);
                     }
                 }
             }
@@ -356,6 +366,8 @@ async fn handle_message(
                 }
 
                 ctx.last_updated = Some(chrono::Utc::now().to_rfc3339());
+                // 記錄來源客戶端 ID
+                ctx.client_id = Some(client_id.to_string());
 
                 let updated_ctx = ctx.clone();
                 drop(ctx);
@@ -403,6 +415,8 @@ async fn handle_message(
                 }
 
                 ctx.last_updated = Some(chrono::Utc::now().to_rfc3339());
+                // 記錄來源客戶端 ID
+                ctx.client_id = Some(client_id.to_string());
             }
 
             // 不發送事件，避免過於頻繁
@@ -537,6 +551,7 @@ mod tests {
                     id: "127.0.0.1:12345".to_string(),
                     name: "VS Code".to_string(),
                     connected_at: "2026-01-23T12:00:00Z".to_string(),
+                    workspace_path: Some("D:\\project_A".to_string()),
                 },
             ],
             current_context: None,
@@ -545,6 +560,7 @@ mod tests {
         assert!(json.contains("\"running\":true"));
         assert!(json.contains("19750"));
         assert!(json.contains("VS Code"));
+        assert!(json.contains("project_A"));
     }
 
     #[test]
@@ -600,9 +616,11 @@ mod tests {
             id: "client-123".to_string(),
             name: "PyCharm".to_string(),
             connected_at: "2026-01-23T10:30:00Z".to_string(),
+            workspace_path: Some("/home/user/my_project".to_string()),
         };
         let json = serde_json::to_string(&client).unwrap();
         assert!(json.contains("PyCharm"));
         assert!(json.contains("client-123"));
+        assert!(json.contains("my_project"));
     }
 }

@@ -4,6 +4,7 @@
   "description": "連接 VS Code 與 Tsunu Alive，分享編輯器 Context",
   "version": "0.1.0",
   "publisher": "tsunu-alive",
+  "icon": "icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
