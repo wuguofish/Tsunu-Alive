@@ -357,12 +357,14 @@ fn scan_skills(working_dir: Option<String>) -> Result<Vec<SkillItem>, String> {
 
 /// 將專案路徑轉換為 Claude CLI 的目錄名稱格式
 /// 例如：d:\game\tsunu_alive → d--game-tsunu-alive
+/// 例如：C:\Users\ATone\.claude\skills\gget-analyzer → c--Users-ATone--claude-skills-gget-analyzer
 fn get_project_dir_name(working_dir: &str) -> String {
-    // 標準化路徑分隔符
+    // 標準化路徑分隔符，把所有特殊字元替換成 - 或移除
     let path = working_dir
         .replace('\\', "/")
         .replace(':', "")
-        .replace('_', "-");
+        .replace('_', "-")
+        .replace('.', "-");  // Claude CLI 也會把 . 替換成 -
 
     // 分割路徑並重新組合
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();

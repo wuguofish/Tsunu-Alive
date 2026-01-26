@@ -368,10 +368,7 @@ async function selectWorkingDir() {
       currentToolUses.value = [];
 
       // 清空舊的歷史 sessions（避免看到舊專案的資料）
-      historySessions.value = [];
-
-      // 重新載入標籤頁（每個專案有自己的標籤頁）
-      await tabManager.initialize(workingDir.value);
+      historySessions.value = [];  
 
       // 重新載入 skills
       skillsLoaded.value = false;
@@ -379,6 +376,9 @@ async function selectWorkingDir() {
 
       // 重新載入歷史 sessions
       await loadHistorySessions();
+
+      // 重新載入標籤頁（每個專案有自己的標籤頁）
+      await tabManager.initialize(workingDir.value);
 
       // 切換完成：恢復 idle 狀態
       isLoading.value = false;
@@ -1066,7 +1066,7 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
     // 呼叫 Rust 端送出訊息給 Claude CLI
     await invoke('send_to_claude', {
       prompt: content,
-      workingDir: null,  // 使用預設目錄
+      workingDir: workingDir.value,  // 使用當前選擇的專案目錄
       allowedTools: allAllowedTools.length > 0 ? allAllowedTools : null,
       permissionMode: permissionMode,
       extendedThinking: extendedThinking.value || null,

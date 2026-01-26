@@ -355,6 +355,11 @@ function toggleExpand() {
 
       <!-- Bash 工具：顯示輸入和輸出 -->
       <template v-if="type === 'Bash'">
+        <!-- 錯誤訊息（權限被拒絕等） -->
+        <div v-if="isToolError && output" class="tool-error">
+          <AlertTriangle class="error-icon" :size="14" />
+          <span class="error-message">{{ formattedErrorMessage }}</span>
+        </div>
         <div v-if="input" class="tool-block">
           <div class="block-header">
             <div class="block-label">IN</div>
