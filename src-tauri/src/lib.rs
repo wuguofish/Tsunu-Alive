@@ -57,13 +57,11 @@ async fn send_to_claude(
     extended_thinking: Option<bool>,
     resume_session_id: Option<String>,
 ) -> Result<(), String> {
-    // 取得 session_id：優先使用傳入的 resume_session_id，否則使用當前進程的 session_id
+    // session_id 直接使用前端傳入的值：
+    // - 有值 → 繼續該對話
+    // - None → 開始新對話
     let process = state.claude_process.clone();
-    let session_id = if resume_session_id.is_some() {
-        resume_session_id
-    } else {
-        claude::get_session_id(process.clone()).await
-    };
+    let session_id = resume_session_id;
 
     // 執行 Claude CLI
     claude::run_claude(app, process, prompt, working_dir, session_id, allowed_tools, permission_mode, extended_thinking).await
