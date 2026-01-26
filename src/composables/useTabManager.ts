@@ -39,9 +39,16 @@ export function useTabManager() {
 
   /**
    * 初始化（載入持久化的標籤頁）
+   * 切換專案時也會呼叫此函數重新載入標籤頁
    */
   async function initialize(dir: string) {
+    // 如果是同一個專案且已初始化，跳過
     if (initialized && workingDir === dir) return;
+
+    // 切換專案時，先重置狀態
+    if (workingDir && workingDir !== dir) {
+      initialized = false;
+    }
 
     workingDir = dir;
 
@@ -57,14 +64,11 @@ export function useTabManager() {
         if (!tabs.value.find(t => t.id === activeTabId.value)) {
           activeTabId.value = tabs.value[0]?.id || null;
         }
-
-        console.log(`📂 Loaded ${tabs.value.length} tabs`);
       } else {
         // 沒有持久化資料，建立預設標籤頁
         const defaultTab = createDefaultTabState(nanoid());
         tabs.value = [defaultTab];
         activeTabId.value = defaultTab.id;
-        console.log('📂 Created default tab');
       }
 
       initialized = true;

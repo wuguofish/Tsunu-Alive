@@ -85,7 +85,12 @@
       "Bash(curl:*)",
       "Bash(cargo tauri build:*)",
       "Bash(grep:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(MSYS_NO_PATHCONV=1 claude:*)",
+      "Bash(vsce package:*)",
+      "Bash(code --install-extension:*)",
+      "Bash(npx @vscode/vsce:*)",
+      "Bash(npx tauri:*)"
     ]
   }
 }

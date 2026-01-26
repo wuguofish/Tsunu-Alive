@@ -2,12 +2,15 @@ mod claude;
 mod ide_server;
 mod permission_server;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::path::PathBuf;
 use std::fs;
 use tauri::State;
 use tokio::sync::Mutex;
 use serde_json::{json, Value};
+
+// 命令列指定的工作目錄（全域）
+static CUSTOM_WORKING_DIR: OnceLock<String> = OnceLock::new();
 
 // 全域狀態
 struct AppState {
@@ -92,8 +95,14 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// 取得當前工作目錄
+/// 優先返回命令列參數指定的目錄，否則返回當前目錄
 #[tauri::command]
 fn get_working_directory() -> Result<String, String> {
+    // 優先使用命令列參數指定的工作目錄
+    if let Some(custom_dir) = CUSTOM_WORKING_DIR.get() {
+        return Ok(custom_dir.clone());
+    }
+
     std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| format!("Failed to get working directory: {}", e))
@@ -1292,12 +1301,30 @@ const PERMISSION_SERVER_PORT: u16 = 19751;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 解析命令列參數
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--working-dir" || args[i] == "-w" {
+            if let Some(dir) = args.get(i + 1) {
+                let path = PathBuf::from(dir);
+                if path.exists() && path.is_dir() {
+                    let _ = CUSTOM_WORKING_DIR.set(path.to_string_lossy().to_string());
+                    println!("📂 Working directory set to: {}", dir);
+                } else {
+                    eprintln!("⚠️ Warning: specified working directory does not exist: {}", dir);
+                }
+            }
+            break;
+        }
+    }
+
     // 建立共享的 permission state
     let permission_state = permission_server::create_shared_state();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             claude_process: Arc::new(Mutex::new(claude::ClaudeProcess::default())),
             permission_state: permission_state.clone(),

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, nextTick, computed, onMounted, onUnmounted } from "vue";
+import { ref, nextTick, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readImage } from "@tauri-apps/plugin-clipboard-manager";
-import { File, Folder, Paperclip, Copy, Check, Square, Slash } from "lucide-vue-next";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { File, Folder, Paperclip, Copy, Check, Square, Slash, FolderOpen } from "lucide-vue-next";
 import ToolIndicator from "./components/ToolIndicator.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
 import PlanApprovalDialog from "./components/PlanApprovalDialog.vue";
@@ -54,19 +55,109 @@ let unlistenClaude: UnlistenFn | null = null;
 let unlistenPermissionRequest: UnlistenFn | null = null;
 let unlistenPlanApproval: UnlistenFn | null = null;
 
-// Avatar 圖片對應
-const avatarImages: Record<AvatarState, string> = {
-  idle: '/tsunu-3.png',       // 待機：側臉望向遠方，靜靜陪伴
-  processing: '/tsunu-4.png', // 處理中：視線向下，專注盯螢幕
-  complete: '/tsunu-1.png',   // 完成：溫柔微笑，開心看著你
-  waiting: '/tsunu-2.png',    // 等待選擇：側臉淺笑，「你覺得呢？」
+// Avatar 圖片對應 - 靜態狀態（無眨眼動畫的狀態）
+const staticAvatarImages: Record<string, string> = {
+  thinking: '/character/thinking.png',      // 思考中：手托下巴
+  complete: '/character/complete-1.png',    // 完成：比讚
+  planApproved: '/character/complete-2.png', // 計畫批准：OK 手勢
+  // error 和 waiting 已改為動畫（有眨眼）
 };
+
+// Idle 眨眼動畫幀（約 5 秒一次眨眼，10fps = 50 幀，有半閉）
+const idleFrames = [
+  ...Array(23).fill('/character/idle.png'),    // 睜眼
+  '/character/idle-half.png',                   // 半閉
+  '/character/idle-blink.png',                  // 閉眼
+  '/character/idle-blink.png',                  // 閉眼
+  '/character/idle-half.png',                   // 半閉
+  ...Array(23).fill('/character/idle.png'),    // 睜眼
+];
+
+// Working 動畫幀（8 張循環）
+const workingFrames = [
+  '/character/working-1.png',
+  '/character/working-2.png',
+  '/character/working-1.png',
+  '/character/working-3.png',
+  '/character/working-1.png',
+  '/character/working-4.png',
+  '/character/working-1.png',
+  '/character/working-5.png',
+  '/character/working-1.png',
+  '/character/working-6.png',
+  '/character/working-7.png',
+  '/character/working-8.png',
+];
+
+// Error 眨眼動畫幀（約 5 秒一次眨眼，5fps = 25 幀，無半閉）
+const errorFrames = [
+  ...Array(24).fill('/character/error.png'),      // 睜眼（大部分時間）
+  '/character/error-blink.png',                    // 閉眼
+];
+
+// Waiting 眨眼動畫幀（約 5 秒一次眨眼，5fps = 25 幀，無半閉）
+const waitingFrames = [
+  ...Array(24).fill('/character/waiting.png'),    // 睜眼（大部分時間）
+  '/character/waiting-blink.png',                  // 閉眼
+];
 
 // 當前表情狀態
 const avatarState = ref<AvatarState>('idle');
 
+// 動畫相關
+const currentFrame = ref(0);
+let avatarAnimationTimer: ReturnType<typeof setInterval> | null = null;
+
 // 計算當前應顯示的 Avatar
-const currentAvatar = computed(() => avatarImages[avatarState.value]);
+const currentAvatar = computed(() => {
+  const state = avatarState.value;
+  if (state === 'idle') {
+    return idleFrames[currentFrame.value % idleFrames.length];
+  } else if (state === 'working') {
+    return workingFrames[currentFrame.value % workingFrames.length];
+  } else if (state === 'error') {
+    return errorFrames[currentFrame.value % errorFrames.length];
+  } else if (state === 'waiting') {
+    return waitingFrames[currentFrame.value % waitingFrames.length];
+  } else {
+    return staticAvatarImages[state] || '/character/idle.png';
+  }
+});
+
+// 開始動畫
+function startAvatarAnimation(fps: number) {
+  stopAvatarAnimation();
+  currentFrame.value = 0;
+  avatarAnimationTimer = setInterval(() => {
+    currentFrame.value++;
+  }, 1000 / fps);
+}
+
+// 停止動畫
+function stopAvatarAnimation() {
+  if (avatarAnimationTimer) {
+    clearInterval(avatarAnimationTimer);
+    avatarAnimationTimer = null;
+  }
+  currentFrame.value = 0;
+}
+
+// 監控 avatarState 變化，控制動畫
+watch(avatarState, (newState) => {
+  if (newState === 'idle') {
+    // 待機：慢速眨眼（約 5 秒一個循環，52 幀 @ 10fps）
+    startAvatarAnimation(10);
+  } else if (newState === 'working') {
+    // 工作中：快速動畫（12 幀，約 2 秒循環 = 6fps）
+    startAvatarAnimation(6);
+  } else if (newState === 'error' || newState === 'waiting') {
+    // error/waiting：慢速眨眼（約 5 秒一次，25 幀 @ 5fps）
+    startAvatarAnimation(5);
+  } else {
+    // 其他狀態（thinking, complete, planApproved）：停止動畫，顯示靜態圖
+    stopAvatarAnimation();
+  }
+}, { immediate: true });
 
 // 對話歷史
 const messages = ref<Message[]>([
@@ -247,6 +338,61 @@ const workingDirName = computed(() => {
   const parts = workingDir.value.split(/[\\/]/);
   return parts[parts.length - 1] || parts[parts.length - 2] || '—';
 });
+
+// 選擇工作目錄
+async function selectWorkingDir() {
+  try {
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      title: '選擇專案資料夾',
+      defaultPath: workingDir.value || undefined,
+    });
+
+    if (selected && typeof selected === 'string') {
+      // 開始切換：顯示 loading 狀態
+      isLoading.value = true;
+      busyStatus.value = '切換專案中...';
+      avatarState.value = 'working';
+
+      // 更新工作目錄
+      workingDir.value = selected;
+
+      // 清除當前 session 狀態
+      sessionId.value = null;
+      messages.value = [{
+        role: 'assistant',
+        items: [{ type: 'text', content: `好，我們來看看 ${workingDirName.value} 這個專案～ *推眼鏡*` }]
+      }];
+      streamingText.value = '';
+      currentToolUses.value = [];
+
+      // 清空舊的歷史 sessions（避免看到舊專案的資料）
+      historySessions.value = [];
+
+      // 重新載入標籤頁（每個專案有自己的標籤頁）
+      await tabManager.initialize(workingDir.value);
+
+      // 重新載入 skills
+      skillsLoaded.value = false;
+      await loadSkills();
+
+      // 重新載入歷史 sessions
+      await loadHistorySessions();
+
+      // 切換完成：恢復 idle 狀態
+      isLoading.value = false;
+      busyStatus.value = '';
+      avatarState.value = 'idle';
+    }
+  } catch (error) {
+    console.error('Failed to select directory:', error);
+    // 錯誤時也要恢復狀態
+    isLoading.value = false;
+    busyStatus.value = '';
+    avatarState.value = 'error';
+  }
+}
 
 // Context 用量（0-100，null 表示尚未取得）
 const contextUsage = ref<number | null>(null);
@@ -900,7 +1046,7 @@ onUnmounted(() => {
 async function sendMessageCore(content: string, extraAllowedTools: string[] = []) {
   // 開始載入狀態
   isLoading.value = true;
-  avatarState.value = 'processing';
+  avatarState.value = 'thinking';
   startBusyTextAnimation();
   streamingText.value = '';
   currentToolUses.value = [];  // 清空當前請求的工具追蹤（舊的已保存在 messages 中）
@@ -1042,7 +1188,8 @@ function handleKeydown(e: KeyboardEvent) {
       mentionSelectedIndex.value = Math.max(mentionSelectedIndex.value - 1, 0);
       return;
     }
-    if (e.key === 'Enter' || e.key === 'Tab') {
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) {
+      // Tab 或純 Enter 選擇檔案，Shift+Enter/Alt+Enter 讓它換行
       e.preventDefault();
       if (mentionFiles.value.length > 0) {
         selectMentionFile(mentionFiles.value[mentionSelectedIndex.value]);
@@ -1056,7 +1203,8 @@ function handleKeydown(e: KeyboardEvent) {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Enter 發送，Shift+Enter 或 Alt+Enter（Mac: Option+Enter）換行
+  if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     sendMessage();
   }
@@ -1739,7 +1887,7 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
       }
 
       // 恢復狀態
-      avatarState.value = 'processing';
+      avatarState.value = isAllow ? 'working' : 'idle';
       busyStatus.value = isAllow ? '執行中...' : '已拒絕';
 
     } catch (error) {
@@ -1979,7 +2127,7 @@ async function handlePlanApprovalResponse(response: 'approve-auto' | 'approve-ma
       }
 
       // 恢復狀態
-      avatarState.value = isAllowed ? 'processing' : 'idle';
+      avatarState.value = isAllowed ? 'working' : 'idle';
       busyStatus.value = isAllowed ? '執行計畫中...' : '';
 
     } catch (error) {
@@ -2315,8 +2463,8 @@ async function interruptRequest() {
             <span class="mode-icon">{{ editModeIcons[editMode] }}</span>
             <span class="mode-label">{{ editModeLabels[editMode] }}</span>
           </button>
-          <button class="status-btn working-dir" :title="workingDir || '未知'">
-            <Folder class="dir-icon" :size="14" />
+          <button class="status-btn working-dir" :title="workingDir || '點擊選擇專案'" @click="selectWorkingDir">
+            <FolderOpen class="dir-icon" :size="14" />
             <span class="dir-name">{{ workingDirName }}</span>
           </button>
           <button

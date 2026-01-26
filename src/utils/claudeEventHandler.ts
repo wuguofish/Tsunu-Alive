@@ -70,7 +70,14 @@ export interface Message {
 }
 
 // 阿宇的表情狀態
-export type AvatarState = 'idle' | 'processing' | 'complete' | 'waiting';
+export type AvatarState =
+  | 'idle'          // 待機（有眨眼動畫）
+  | 'thinking'      // 思考中
+  | 'working'       // 工作中（有連續動畫）
+  | 'complete'      // 完成（比讚）
+  | 'planApproved'  // 計畫批准（OK 手勢）
+  | 'waiting'       // 等待選擇
+  | 'error';        // 出錯
 
 // 編輯模式
 export type EditMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
@@ -175,6 +182,8 @@ export function handleTextEvent(
     stateUpdates: {
       streamingText: newStreamingText,
       messages,
+      // 收到文字時切換到思考狀態
+      avatarState: 'thinking',
     },
     actions: [{ type: 'scrollToBottom' }],
   };
@@ -228,6 +237,8 @@ export function handleToolUseEvent(
       messages,
       currentToolUses,
       streamingText: '', // 清空累積的文字，讓工具後的文字從新開始
+      // 開始執行工具時切換到工作狀態（有動畫）
+      avatarState: 'working',
     },
     actions: [],
   };
@@ -443,11 +454,29 @@ export function handleToolResultEvent(
     }
   }
 
+  // 根據工具執行結果設定表情
+  const stateUpdates: Partial<AppState> = {
+    messages,
+    currentToolUses,
+  };
+
+  // 判斷是否為「權限未授予」的錯誤（會接著收到 PermissionDenied 事件）
+  const isPermissionError = event.is_error && event.result &&
+    (event.result.includes("haven't granted") || event.result.includes('permission'));
+
+  if (event.is_error && !isPermissionError) {
+    // 真正的錯誤才顯示 error 表情
+    stateUpdates.avatarState = 'error';
+  } else if (isPermissionError) {
+    // 權限未授予：顯示 waiting 表情，等待 PermissionDenied 事件和用戶確認
+    stateUpdates.avatarState = 'waiting';
+  } else if (tool?.name === 'ExitPlanMode') {
+    // ExitPlanMode 成功 → 計畫批准（OK 手勢）
+    stateUpdates.avatarState = 'planApproved';
+  }
+
   return {
-    stateUpdates: {
-      messages,
-      currentToolUses,
-    },
+    stateUpdates,
     actions: [],
   };
 }
@@ -457,11 +486,14 @@ export function handleToolResultEvent(
  */
 export function handleCompleteEvent(
   event: ClaudeEvent,
-  _state: AppState
+  state: AppState
 ): EventHandlerResult {
+  // 如果有待確認的權限請求，保持 waiting 狀態而不是 complete
+  const avatarState = state.pendingPermission ? 'waiting' : 'complete';
+
   const stateUpdates: Partial<AppState> = {
     isLoading: false,
-    avatarState: 'complete',
+    avatarState,
     streamingText: '',
   };
 
@@ -513,7 +545,7 @@ export function handleErrorEvent(
   return {
     stateUpdates: {
       isLoading: false,
-      avatarState: 'idle',
+      avatarState: 'error',  // 出錯時顯示緊張表情
     },
     actions,
   };

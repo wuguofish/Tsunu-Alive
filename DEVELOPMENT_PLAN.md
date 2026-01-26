@@ -216,50 +216,55 @@ VS Code Extension ──WebSocket──▶ Tsunu Alive (WS Server)
 }
 ```
 
-### Phase 4.8：Claude Code Hooks 整合（阿宇表情增強）
+### Phase 4.8：Claude Code Hooks 整合（阿宇表情增強）✅ 核心完成
 
 **靈感來源：** [Clawdachi](https://github.com/gonzchris/Clawdachi) 競品研究
 
 透過 Claude Code 的 hooks 機制，讓阿宇能即時反映 Claude 的工作狀態，提供更豐富的表情變化。
 
-- [ ] **Hooks 安裝機制**
-  - 在 `~/.claude/settings.json` 註冊 hooks
-  - 支援的事件：SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd
-  - 版本控制（避免重複安裝、支援更新）
-- [ ] **狀態橋接腳本**
-  - 建立 `tsunu-status.sh` / `tsunu-status.ps1`（跨平台）
-  - 接收 hook 事件，寫入狀態檔案或直接通知應用
-  - 可選：直接透過 HTTP/WebSocket 通知 Tauri app（避免輪詢）
-- [ ] **表情狀態對應**
+目前Hook機制有一些限制，詳情可以參考：
+docs\ASKUSERQUESTION_HOOK_ANALYSIS.md
 
-  | Hook 事件 | 阿宇狀態 | 表情 |
-  |-----------|----------|------|
-  | `session_start` | 打招呼 | 😊 開心 |
-  | `thinking` / `prompt_submit` | 思考中 | 🤔 皺眉 |
-  | `planning` (EnterPlanMode) | 規劃中 | 💡 眼睛發亮 |
-  | `tool_start` | 執行中 | ⚙️ 專注打字 |
-  | `tool_end` + success | 完成 | 🎉 開心 |
-  | `tool_end` + error | 出錯 | 😰 緊張 |
-  | `waiting` | 等待中 | ❓ 疑惑 |
-  | `session_end` | 結束 | 👋 揮手 |
+所以**目前是透過 stream-json 事件**判斷表情切換。
 
-- [ ] **UI 整合**
-  - 新增更多阿宇表情圖片（擴充現有 4 張）
-  - 表情切換動畫
-  - 狀態文字提示（「阿宇正在思考...」）
+- [x] ~~**Hooks 安裝機制**~~ ⏸️ 暫緩
+  - ⚠️ **暫緩原因**：`PreToolUse` / `PostToolUse` 在 Headless/JSON 模式下有 Bug，不會觸發
+  - 參考：[#6305](https://github.com/anthropics/claude-code/issues/6305)
+  - 改用 stream-json 事件判斷，效果相同且更可靠
+- [x] ~~**狀態橋接腳本**~~ ❌ 不需要
+  - ⚠️ **不需要原因**：已透過 stream-json 事件直接取得 Claude 狀態
+  - 不需要額外的腳本和 HTTP/WebSocket 橋接
+- [x] **表情狀態對應** ✅ 完成（透過 stream-json 事件）
 
-**技術架構：**
+  | stream-json 事件 | 阿宇狀態 | 圖片 |
+  |------------------|----------|------|
+  | 待機 | `idle` | idle.png + 眨眼動畫 |
+  | Text 事件 | `thinking` | thinking.png |
+  | ToolUse 事件 | `working` | working-1~8.png 動畫 |
+  | Complete 事件 | `complete` | complete-1.png (比讚) |
+  | ExitPlanMode 成功 | `planApproved` | complete-2.png (OK) |
+  | 權限請求/AskUserQuestion | `waiting` | waiting.png |
+  | ToolResult + is_error | `error` | error.png |
+  | Error 事件 | `error` | error.png |
+
+- [x] **UI 整合** ✅ 部分完成
+  - [x] 新增更多阿宇表情圖片（15+ 張）
+  - [x] idle 眨眼動畫（3fps, 9 幀循環）
+  - [x] working 連續動畫（8fps, 8 幀循環）
+  - [x] 狀態文字提示（busyStatus + getRandomThinkingText()）✅ 已有
+
+**實際技術架構（簡化版）：**
 
 ```
-Claude Code 事件
+Claude CLI (--output-format stream-json)
       ↓
-~/.claude/settings.json hooks
+Tauri App 解析事件
       ↓
-tsunu-status script
-      ↓ (HTTP POST 或寫入狀態檔)
-Tsunu Alive App
+claudeEventHandler.ts 判斷狀態
       ↓
-阿宇表情變化
+avatarState 更新
+      ↓
+阿宇表情變化（含動畫）
 ```
 
 **與現有 IDE 整合的關係：**
@@ -267,7 +272,7 @@ Tsunu Alive App
 | 資訊來源 | 獲取方式 | 用途 |
 |----------|----------|------|
 | IDE context（檔案、選取） | WebSocket ← VS Code extension | `@file#L1-10` 參考 |
-| Claude 狀態（thinking/tools） | Hooks → 腳本 | 阿宇表情變化 |
+| Claude 狀態（thinking/tools） | stream-json 事件 | 阿宇表情變化 |
 
 兩者互補，不衝突。
 
