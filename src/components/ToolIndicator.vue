@@ -3,13 +3,25 @@ import { ref, computed } from 'vue';
 import hljs from 'highlight.js';
 import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
 import { renderMarkdown } from '../utils/markdown';
-import { AlertTriangle, Check, Circle, CircleDot, Copy } from 'lucide-vue-next';
+import { AlertTriangle, Check, Circle, CircleDot, Copy, Image as ImageIcon } from 'lucide-vue-next';
+import ImageModal from './ImageModal.vue';
 
 // 複製狀態追蹤
 const copiedBlockId = ref<string | null>(null);
 
 // Block 內容展開狀態追蹤（預設全部摺疊）
 const expandedBlocks = ref<Set<string>>(new Set());
+
+// 圖片 Modal 狀態
+const showImageModal = ref(false);
+
+function openImageModal() {
+  showImageModal.value = true;
+}
+
+function closeImageModal() {
+  showImageModal.value = false;
+}
 
 // 切換 Block 展開狀態
 function toggleBlockExpand(blockId: string) {
@@ -50,6 +62,7 @@ async function copyToClipboard(text: string, blockId: string) {
 }
 
 // 智慧開啟檔案：IDE 連線時用編輯器開啟，否則在檔案總管顯示
+// 如果 openPath 失敗（例如權限問題），自動 fallback 到檔案總管
 async function openFile(filePath: string) {
   try {
     if (props.ideConnected) {
@@ -62,7 +75,13 @@ async function openFile(filePath: string) {
       await revealItemInDir(filePath);
     }
   } catch (err) {
-    console.error('Failed to open/reveal file:', err);
+    console.warn('Failed to open file, trying to reveal in explorer:', err);
+    // Fallback：嘗試在檔案總管中顯示
+    try {
+      await revealItemInDir(filePath);
+    } catch (fallbackErr) {
+      console.error('Failed to reveal file in explorer:', fallbackErr);
+    }
   }
 }
 
@@ -154,6 +173,9 @@ const props = defineProps<{
   ideConnected?: boolean;
   // Edit 工具的結構化差異（VS Code 風格 Diff View）
   structuredPatch?: DiffHunk[];
+  // 圖片結果的 base64 資料（Read 工具讀取圖片時）
+  imageBase64?: string;
+  imageMediaType?: string;  // 例如 'image/png', 'image/jpeg'
 }>();
 
 // 是否展開
@@ -480,6 +502,22 @@ function toggleExpand() {
         <div v-if="isToolError && output" class="tool-error">
           <AlertTriangle class="error-icon" :size="14" />
           <span class="error-message">{{ formattedErrorMessage }}</span>
+        </div>
+        <!-- 圖片結果：顯示縮圖，點擊開啟大圖 -->
+        <div v-else-if="imageBase64" class="tool-block output image-result">
+          <div class="block-header">
+            <div class="block-label"><ImageIcon :size="12" /> IMAGE</div>
+          </div>
+          <div class="image-thumbnail-container" @click="openImageModal">
+            <img
+              :src="`data:${imageMediaType || 'image/png'};base64,${imageBase64}`"
+              alt="Image result"
+              class="image-thumbnail"
+            />
+            <div class="image-overlay">
+              <span>點擊放大</span>
+            </div>
+          </div>
         </div>
         <!-- 正常內容 -->
         <div v-else-if="output" class="tool-block output">
@@ -923,6 +961,14 @@ function toggleExpand() {
         </div>
       </template>
     </div>
+
+    <!-- 圖片放大 Modal -->
+    <ImageModal
+      v-if="showImageModal && imageBase64"
+      :image-base64="imageBase64"
+      :media-type="imageMediaType"
+      @close="closeImageModal"
+    />
   </div>
 </template>
 
@@ -1674,5 +1720,72 @@ pre.block-content {
 
 .fallback-icon {
   font-size: 1em;
+}
+
+/* 圖片結果縮圖樣式 */
+.image-result .block-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-result .block-header .block-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.image-thumbnail-container {
+  position: relative;
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.image-thumbnail {
+  max-width: 200px;
+  max-height: 150px;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.image-thumbnail-container:hover .image-thumbnail {
+  transform: scale(1.02);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.image-overlay {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 24px);
+  max-width: 200px;
+  height: calc(100% - 24px);
+  max-height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.5);
+  border-radius: 6px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+
+.image-thumbnail-container:hover .image-overlay {
+  opacity: 1;
+}
+
+.image-overlay span {
+  color: #fff;
+  font-size: 0.85em;
+  font-weight: 500;
+  padding: 6px 12px;
+  background-color: rgba(0, 0, 0, 0.6);
+  border-radius: 4px;
 }
 </style>

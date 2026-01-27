@@ -156,6 +156,12 @@ pub struct HistoryToolUse {
     /// 工具執行是否失敗（對應 Claude CLI 的 is_error 欄位）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    /// 圖片結果的 base64 資料（Read 工具讀取圖片時）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_base64: Option<String>,
+    /// 圖片 MIME 類型，例如 'image/png'
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_media_type: Option<String>,
 }
 
 /// 歷史訊息（對應前端的 Message）
@@ -648,6 +654,43 @@ fn load_session_history(
                                     .and_then(|r| r.get("structuredPatch"))
                                     .cloned();
 
+                                // 提取圖片的 base64 資料（Read 工具讀取圖片時）
+                                let image_base64: Option<String> = {
+                                    // 方式 1：從 toolUseResult.file.base64 提取
+                                    let from_tool_result = tool_use_result
+                                        .and_then(|r| r.get("file"))
+                                        .and_then(|f| f.get("base64"))
+                                        .and_then(|b| b.as_str())
+                                        .map(|s| s.to_string());
+
+                                    // 方式 2：從 content_item.content[0].source.data 提取（Claude API 圖片格式）
+                                    let from_content = content_item.get("content")
+                                        .and_then(|c| c.as_array())
+                                        .and_then(|arr| arr.first())
+                                        .filter(|first| first.get("type").and_then(|t| t.as_str()) == Some("image"))
+                                        .and_then(|img| img.get("source"))
+                                        .and_then(|src| src.get("data"))
+                                        .and_then(|d| d.as_str())
+                                        .map(|s| s.to_string());
+
+                                    from_tool_result.or(from_content)
+                                };
+
+                                // 提取圖片 MIME 類型
+                                let image_media_type: Option<String> = if image_base64.is_some() {
+                                    // 從 content_item.content[0].source.media_type 提取
+                                    content_item.get("content")
+                                        .and_then(|c| c.as_array())
+                                        .and_then(|arr| arr.first())
+                                        .and_then(|first| first.get("source"))
+                                        .and_then(|src| src.get("media_type"))
+                                        .and_then(|m| m.as_str())
+                                        .map(|s| s.to_string())
+                                        .or_else(|| Some("image/png".to_string()))
+                                } else {
+                                    None
+                                };
+
                                 // 在之前的 messages 中找到對應的工具並更新結果
                                 for msg in messages.iter_mut().rev() {
                                     if msg.role == "assistant" {
@@ -669,6 +712,11 @@ fn load_session_history(
                                                     // 設定 Edit 工具的結構化差異
                                                     if structured_patch.is_some() {
                                                         tool.structured_patch = structured_patch.clone();
+                                                    }
+                                                    // 設定圖片的 base64 資料
+                                                    if image_base64.is_some() {
+                                                        tool.image_base64 = image_base64.clone();
+                                                        tool.image_media_type = image_media_type.clone();
                                                     }
                                                     found = true;
                                                     break;
@@ -755,6 +803,8 @@ fn load_session_history(
                                         result: None,  // 結果會在後續的 user 訊息中填充
                                         structured_patch: None,  // 會在後續的 user 訊息中填充
                                         is_error: None,  // 錯誤狀態會在後續的 user 訊息中填充
+                                        image_base64: None,  // 圖片資料會在後續的 user 訊息中填充
+                                        image_media_type: None,  // 圖片類型會在後續的 user 訊息中填充
                                     };
 
                                     assistant_items.push(HistoryChatItem::Tool { tool });
@@ -1021,6 +1071,180 @@ fn cleanup_temp_image(file_path: String) -> Result<(), String> {
             .map_err(|e| format!("Failed to delete temp file: {}", e))?;
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Memory Commands (阿宇記憶系統)
+// ============================================================================
+
+/// 記憶類型
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryType {
+    Milestone,   // 里程碑
+    Experience,  // 共同經歷
+    Growth,      // 成長軌跡
+    Emotional,   // 情感連結
+}
+
+/// 單筆記憶
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UniMemory {
+    pub id: String,
+    pub content: String,
+    #[serde(rename = "type")]
+    pub memory_type: MemoryType,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    pub source: String,  // "manual" 或 "auto"
+}
+
+/// 記憶儲存格式
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UniMemoryStore {
+    pub version: u32,
+    pub memories: Vec<UniMemory>,
+    #[serde(rename = "lastUpdated")]
+    pub last_updated: String,
+}
+
+/// 取得記憶檔案路徑（~/.tsunu-alive/memories.json）
+fn get_memories_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".tsunu-alive").join("memories.json"))
+}
+
+/// 讀取所有記憶
+#[tauri::command]
+fn read_memories() -> Result<UniMemoryStore, String> {
+    let memories_path = get_memories_path()
+        .ok_or("Cannot find home directory")?;
+
+    if !memories_path.exists() {
+        // 返回空的記憶儲存
+        return Ok(UniMemoryStore {
+            version: 1,
+            memories: Vec::new(),
+            last_updated: chrono::Local::now().to_rfc3339(),
+        });
+    }
+
+    let content = fs::read_to_string(&memories_path)
+        .map_err(|e| format!("Failed to read memories file: {}", e))?;
+
+    let store: UniMemoryStore = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse memories file: {}", e))?;
+
+    eprintln!("📖 Loaded {} memories from {:?}", store.memories.len(), memories_path);
+    Ok(store)
+}
+
+/// 新增一筆記憶
+#[tauri::command]
+fn write_memory(
+    content: String,
+    memory_type: String,
+    source: String,
+) -> Result<UniMemory, String> {
+    let memories_path = get_memories_path()
+        .ok_or("Cannot find home directory")?;
+
+    // 確保目錄存在
+    if let Some(parent) = memories_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create .tsunu-alive directory: {}", e))?;
+    }
+
+    // 讀取現有記憶
+    let mut store: UniMemoryStore = if memories_path.exists() {
+        let content = fs::read_to_string(&memories_path)
+            .map_err(|e| format!("Failed to read memories file: {}", e))?;
+        serde_json::from_str(&content)
+            .unwrap_or_else(|_| UniMemoryStore {
+                version: 1,
+                memories: Vec::new(),
+                last_updated: chrono::Local::now().to_rfc3339(),
+            })
+    } else {
+        UniMemoryStore {
+            version: 1,
+            memories: Vec::new(),
+            last_updated: chrono::Local::now().to_rfc3339(),
+        }
+    };
+
+    // 解析記憶類型
+    let parsed_type = match memory_type.to_lowercase().as_str() {
+        "milestone" => MemoryType::Milestone,
+        "experience" => MemoryType::Experience,
+        "growth" => MemoryType::Growth,
+        "emotional" => MemoryType::Emotional,
+        _ => MemoryType::Experience, // 預設為共同經歷
+    };
+
+    // 產生唯一 ID（使用時間戳 + 隨機數）
+    let id = format!("mem_{}", chrono::Local::now().format("%Y%m%d%H%M%S%3f"));
+
+    // 建立新記憶
+    let new_memory = UniMemory {
+        id: id.clone(),
+        content,
+        memory_type: parsed_type,
+        created_at: chrono::Local::now().to_rfc3339(),
+        source,
+    };
+
+    // 新增到記憶列表
+    store.memories.push(new_memory.clone());
+    store.last_updated = chrono::Local::now().to_rfc3339();
+
+    // 限制記憶數量（保留最新的 20 筆）
+    const MAX_MEMORIES: usize = 20;
+    if store.memories.len() > MAX_MEMORIES {
+        store.memories = store.memories.split_off(store.memories.len() - MAX_MEMORIES);
+    }
+
+    // 寫入檔案
+    let json_content = serde_json::to_string_pretty(&store)
+        .map_err(|e| format!("Failed to serialize memories: {}", e))?;
+    fs::write(&memories_path, json_content)
+        .map_err(|e| format!("Failed to write memories file: {}", e))?;
+
+    eprintln!("💾 Memory saved: {} (total: {})", id, store.memories.len());
+    Ok(new_memory)
+}
+
+/// 刪除一筆記憶
+#[tauri::command]
+fn delete_memory(id: String) -> Result<(), String> {
+    let memories_path = get_memories_path()
+        .ok_or("Cannot find home directory")?;
+
+    if !memories_path.exists() {
+        return Err("No memories file found".to_string());
+    }
+
+    let content = fs::read_to_string(&memories_path)
+        .map_err(|e| format!("Failed to read memories file: {}", e))?;
+
+    let mut store: UniMemoryStore = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse memories file: {}", e))?;
+
+    let original_len = store.memories.len();
+    store.memories.retain(|m| m.id != id);
+
+    if store.memories.len() == original_len {
+        return Err(format!("Memory not found: {}", id));
+    }
+
+    store.last_updated = chrono::Local::now().to_rfc3339();
+
+    let json_content = serde_json::to_string_pretty(&store)
+        .map_err(|e| format!("Failed to serialize memories: {}", e))?;
+    fs::write(&memories_path, json_content)
+        .map_err(|e| format!("Failed to write memories file: {}", e))?;
+
+    eprintln!("🗑️ Memory deleted: {}", id);
     Ok(())
 }
 
@@ -1354,7 +1578,10 @@ pub fn run() {
             clear_session_whitelist,
             save_temp_image,
             save_temp_image_png,
-            cleanup_temp_image
+            cleanup_temp_image,
+            read_memories,
+            write_memory,
+            delete_memory
         ])
         .setup(move |app| {
             // 安裝 PermissionRequest Hook

@@ -349,6 +349,29 @@ avatarState 更新
 - [x] IDE 連線時：使用 `openPath` 在編輯器中開啟
 - [x] 未連線時：使用 `revealItemInDir` 在檔案總管顯示
 
+### Phase 4.11：圖片結果顯示 ✅ 完成
+
+當 Claude 使用 Read 工具讀取圖片時，顯示縮圖預覽和放大 Modal。
+
+**完成項目：**
+
+- [x] 後端 `ClaudeEvent::ToolResult` 加入 `image_base64` 欄位
+- [x] 後端解析 `toolUseResult.file.base64` 提取圖片資料
+- [x] 前端 `ImageModal.vue` 顯示大圖（ESC / 點擊背景關閉）
+- [x] 前端 `ToolIndicator.vue` 顯示縮圖，點擊觸發 Modal
+- [x] 歷史訊息也能正確顯示圖片縮圖
+- [x] 檔案路徑開啟失敗時 fallback 到檔案總管
+
+### Phase 4.12：Skill 內容摺疊 ✅ 完成
+
+歷史對話中的 Skill 詳細內容改為摺疊顯示。
+
+**完成項目：**
+
+- [x] 檢測 `Base directory for this skill:` 開頭的訊息
+- [x] 顯示為簡潔徽章卡片（📚 + skill 名稱 + 目錄）
+- [x] 隱藏冗長的 skill markdown 內容
+
 ### Phase 5：進階功能（低優先級）
 
 - [ ] **MCP 伺服器支援** - 連接外部工具、資料庫、API
@@ -649,15 +672,18 @@ fi
 
 ### 實作步驟
 
-1. **Phase 1：基礎架構（手動記憶）**
-   - [ ] 實作記憶檔案讀寫（Rust 後端 `read_memories` / `write_memory`）
-   - [ ] 建立 `/remember` Skill（方案 B）
-   - [ ] 修改 `/uni` Skill 載入記憶並注入 System Prompt
+1. **Phase 1：基礎架構（手動記憶）** ✅ 完成
+   - [x] 實作記憶檔案讀寫（Rust 後端 `read_memories` / `write_memory` / `delete_memory`）
+   - [x] 前端攔截 `/remember` 指令（直接儲存，不送給 Claude）
+   - [x] 修改 `/uni` Skill 說明讀取記憶檔案的方式
+   - [x] TypeScript 型別定義 `src/types/memories.ts`
+   - [x] 記憶儲存位置改為全域：`~/.tsunu-alive/memories.json`
 
-2. **Phase 2：自動提取（Compact 觸發）**
-   - [ ] 在 CLAUDE.md 加入 Compact 檢測指令（方案 A'）
-   - [ ] 前端解析回應中的 `<memory-update>` 標籤
-   - [ ] 自動儲存提取的記憶到 `.claude/uni-memories.json`
+2. **Phase 2：自動提取（Compact 觸發）** ✅ 完成
+   - [x] 建立 UserPromptSubmit Hook 腳本（`.claude/hooks/check-compact.ps1` / `.sh`）
+   - [x] 設定 hook 在 `.claude/settings.json`
+   - [x] 前端解析回應中的 `<memory-update>` 標籤（App.vue `extractAndSaveMemories`）
+   - [x] 自動儲存提取的記憶到 `~/.tsunu-alive/memories.json`（source: 'auto'）
 
 3. **Phase 3：記憶管理 UI（可選）**
    - [ ] 查看所有記憶
@@ -667,6 +693,7 @@ fi
 ### 參考架構
 
 本設計參考了 `my-ai-chat` 專案的記憶系統（`stores/memories.ts`）：
+- soource code: D:\7755\my-ai-chat
 - 短期記憶 + 長期記憶分層
 - 智慧覆蓋機制（滿了時覆蓋最舊的已處理記憶）
 - Pinia + LocalStorage 持久化

@@ -33,6 +33,9 @@ export interface ClaudeEvent {
   context_window_used_percent?: number;
   // Edit 工具的結構化差異（ToolResult 事件）
   structured_patch?: DiffHunk[];
+  // 圖片結果的 base64 資料（Read 工具讀取圖片時，ToolResult 事件）
+  image_base64?: string;
+  image_media_type?: string;  // 例如 'image/png', 'image/jpeg'
 }
 
 // 待確認的權限請求
@@ -56,11 +59,13 @@ export interface ToolUseItem {
   userResponse?: string;
   userAnswered?: boolean;  // 標記用戶已回答（AskUserQuestion）
   structuredPatch?: DiffHunk[];  // Edit 工具的結構化差異
+  imageBase64?: string;  // 圖片結果的 base64 資料（Read 工具讀取圖片時）
+  imageMediaType?: string;  // 圖片 MIME 類型，例如 'image/png'
 }
 
 // 對話項目（文字或工具，按時間順序）
 export type ChatItem =
-  | { type: 'text'; content: string }
+  | { type: 'text'; content: string; isSkill?: boolean; skillName?: string; skillDir?: string }
   | { type: 'tool'; tool: ToolUseItem };
 
 // 訊息類型
@@ -418,6 +423,11 @@ export function handleToolResultEvent(
     if (event.structured_patch) {
       tool.structuredPatch = event.structured_patch;
     }
+    // 儲存圖片結果的 base64 資料
+    if (event.image_base64) {
+      tool.imageBase64 = event.image_base64;
+      tool.imageMediaType = event.image_media_type || 'image/png';
+    }
   }
 
   // 更新 messages 中的工具
@@ -450,6 +460,11 @@ export function handleToolResultEvent(
       // 儲存 Edit 工具的結構化差異
       if (event.structured_patch) {
         toolItem.tool.structuredPatch = event.structured_patch;
+      }
+      // 儲存圖片結果的 base64 資料
+      if (event.image_base64) {
+        toolItem.tool.imageBase64 = event.image_base64;
+        toolItem.tool.imageMediaType = event.image_media_type || 'image/png';
       }
     }
   }

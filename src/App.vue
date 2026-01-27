@@ -2,7 +2,6 @@
 import { ref, nextTick, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { readImage } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { File, Folder, Paperclip, Copy, Check, Square, Slash, FolderOpen } from "lucide-vue-next";
 import ToolIndicator from "./components/ToolIndicator.vue";
@@ -380,6 +379,16 @@ async function selectWorkingDir() {
       // 重新載入標籤頁（每個專案有自己的標籤頁）
       await tabManager.initialize(workingDir.value);
 
+      // 恢復目前標籤頁的狀態
+      restoreTabState();
+
+      // 如果目前標籤頁有 sessionId，載入歷史訊息
+      const activeTab = tabManager.activeTab.value;
+      if (activeTab?.sessionId) {
+        sessionId.value = activeTab.sessionId;
+        await loadTabHistory(activeTab.sessionId);
+      }
+
       // 切換完成：恢復 idle 狀態
       isLoading.value = false;
       busyStatus.value = '';
@@ -658,6 +667,75 @@ function handleClaudeEvent(event: ClaudeEvent) {
 
   // 應用結果
   applyEventResult(result);
+
+  // Complete 事件時檢查是否有 <memory-update> 標籤（自動記憶提取）
+  if (event.event_type === 'Complete') {
+    extractAndSaveMemories();
+  }
+}
+
+/**
+ * 從最後一個 assistant 訊息中提取並儲存記憶
+ * 格式：<memory-update>
+ * - [type:experience] 記憶內容
+ * - [type:milestone] 另一個記憶
+ * </memory-update>
+ */
+async function extractAndSaveMemories() {
+  // 取得最後一個 assistant 訊息的文字內容
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (!lastMsg || lastMsg.role !== 'assistant') return;
+
+  const textContent = lastMsg.items
+    .filter((item): item is { type: 'text'; content: string } => item.type === 'text')
+    .map(item => item.content)
+    .join('\n');
+
+  // 檢查是否有 <memory-update> 標籤
+  const memoryMatch = textContent.match(/<memory-update>([\s\S]*?)<\/memory-update>/);
+  if (!memoryMatch) return;
+
+  const memoryBlock = memoryMatch[1];
+  console.log('📝 Found memory-update block:', memoryBlock);
+
+  // 解析每一行記憶
+  // 格式：- [type:experience] 記憶內容
+  const memoryLines = memoryBlock.split('\n').filter(line => line.trim().startsWith('-'));
+
+  for (const line of memoryLines) {
+    // 解析 [type:xxx] 和內容
+    const typeMatch = line.match(/\[type:(\w+)\]\s*(.+)/);
+    if (typeMatch) {
+      const memoryType = typeMatch[1]; // milestone, experience, growth, emotional
+      const content = typeMatch[2].trim();
+
+      try {
+        await invoke('write_memory', {
+          content,
+          memoryType,
+          source: 'auto',  // 自動提取
+        });
+        console.log(`💾 Auto-saved memory [${memoryType}]:`, content);
+      } catch (error) {
+        console.error('Failed to save auto memory:', error);
+      }
+    } else {
+      // 沒有 type 標記，使用預設 experience
+      const content = line.replace(/^-\s*/, '').trim();
+      if (content) {
+        try {
+          await invoke('write_memory', {
+            content,
+            memoryType: 'experience',
+            source: 'auto',
+          });
+          console.log('💾 Auto-saved memory [experience]:', content);
+        } catch (error) {
+          console.error('Failed to save auto memory:', error);
+        }
+      }
+    }
+  }
 }
 
 // Hook 權限請求事件類型
@@ -841,7 +919,18 @@ interface HistoryMessage {
   role: string;
   items: Array<
     | { type: 'text'; content: string }
-    | { type: 'tool'; tool: { id: string; name: string; type: string; input: unknown; result?: string; structured_patch?: DiffHunk[]; is_error?: boolean } }
+    | { type: 'tool'; tool: {
+        id: string;
+        name: string;
+        type: string;
+        input: unknown;
+        result?: string;
+        structured_patch?: DiffHunk[];
+        is_error?: boolean;
+        image_base64?: string;
+        image_media_type?: string;
+      }
+    }
   >;
 }
 
@@ -875,6 +964,17 @@ async function handleOpenHistory(sessionId_: string, summary: string | null) {
           role: msg.role as 'user' | 'assistant',
           items: msg.items.map(item => {
             if (item.type === 'text') {
+              // 檢測是否為 skill 內容
+              const skillMatch = item.content.match(/^Base directory for this skill: (.+?)\n\n# (.+?)\r?\n/);
+              if (skillMatch) {
+                return {
+                  type: 'text' as const,
+                  content: item.content,
+                  isSkill: true,
+                  skillDir: skillMatch[1],
+                  skillName: skillMatch[2],
+                };
+              }
               return { type: 'text' as const, content: item.content };
             } else {
               return {
@@ -889,6 +989,9 @@ async function handleOpenHistory(sessionId_: string, summary: string | null) {
                   structuredPatch: item.tool.structured_patch,
                   // 工具執行是否失敗（歷史訊息）
                   isCancelled: item.tool.is_error,
+                  // 圖片結果（歷史訊息）
+                  imageBase64: item.tool.image_base64,
+                  imageMediaType: item.tool.image_media_type,
                 }
               };
             }
@@ -965,6 +1068,17 @@ async function loadTabHistory(tabSessionId: string) {
         role: msg.role as 'user' | 'assistant',
         items: msg.items.map(item => {
           if (item.type === 'text') {
+            // 檢測是否為 skill 內容
+            const skillMatch = item.content.match(/^Base directory for this skill: (.+?)\n\n# (.+?)\r?\n/);
+            if (skillMatch) {
+              return {
+                type: 'text' as const,
+                content: item.content,
+                isSkill: true,
+                skillDir: skillMatch[1],
+                skillName: skillMatch[2],
+              };
+            }
             return { type: 'text' as const, content: item.content };
           } else {
             return {
@@ -979,6 +1093,9 @@ async function loadTabHistory(tabSessionId: string) {
                 structuredPatch: item.tool.structured_patch,
                 // 工具執行是否失敗（歷史訊息）
                 isCancelled: item.tool.is_error,
+                // 圖片結果（歷史訊息）
+                imageBase64: item.tool.image_base64,
+                imageMediaType: item.tool.image_media_type,
               }
             };
           }
@@ -1086,10 +1203,57 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
   }
 }
 
+// /remember 指令處理：儲存記憶到後端
+async function handleRememberCommand(content: string) {
+  try {
+    // 顯示用戶訊息
+    messages.value.push({
+      role: 'user',
+      items: [{ type: 'text', content: `/remember ${content}` }]
+    });
+
+    // 呼叫後端儲存記憶
+    await invoke('write_memory', {
+      content: content,
+      memoryType: 'experience',  // 預設為共同經歷
+      source: 'manual',
+    });
+
+    // 顯示確認訊息
+    messages.value.push({
+      role: 'assistant',
+      items: [{ type: 'text', content: `好，我記住了 ♡\n\n*把「${content}」記在心裡*` }]
+    });
+
+    await scrollToBottom();
+  } catch (error) {
+    console.error('Failed to save memory:', error);
+    messages.value.push({
+      role: 'assistant',
+      items: [{ type: 'text', content: `*皺眉* 記憶儲存失敗：${error}` }]
+    });
+  }
+}
+
 // 送出訊息（從輸入框）
 async function sendMessage() {
   const content = userInput.value.trim();
   if (!content || isLoading.value) return;
+
+  // /remember 指令攔截：直接儲存記憶，不送給 Claude
+  if (content.startsWith('/remember ')) {
+    const memoryContent = content.substring('/remember '.length).trim();
+    if (memoryContent) {
+      await handleRememberCommand(memoryContent);
+    } else {
+      messages.value.push({
+        role: 'assistant',
+        items: [{ type: 'text', content: '欸，要記什麼呢？請在 /remember 後面加上想讓我記住的內容。' }]
+      });
+    }
+    userInput.value = '';
+    return;
+  }
 
   // 組合最終 prompt：IDE 選取 + 文字 + 圖片路徑
   let finalContent = content;
@@ -1210,96 +1374,70 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-// 處理剪貼簿貼上（Ctrl+V）
+// 處理剪貼簿貼上（Ctrl+V）- 使用 Web API
 async function handlePaste(e: ClipboardEvent) {
-  try {
-    // 嘗試從剪貼簿讀取圖片
-    const image = await readImage();
-    if (image) {
-      // 阻止預設貼上行為（不要把圖片內容貼到輸入框）
-      e.preventDefault();
+  const items = e.clipboardData?.items;
+  if (!items) return;
 
-      // 產生唯一 ID 和時間戳記
-      const id = `img_${++imageIdCounter}_${Date.now()}`;
-      const timestamp = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      const name = `截圖_${timestamp}.png`;
-
-      // 立即加入 loading 狀態的項目（讓用戶知道正在處理）
-      attachedImages.value.push({
-        id,
-        path: '',  // 稍後填入
-        name,
-        isTemp: true,
-        isLoading: true,
-      });
-
-      try {
-        // 並行取得圖片資料和尺寸
-        const [rgba, size] = await Promise.all([image.rgba(), image.size()]);
-        const { width, height } = size;
-
-        // 先產生縮圖預覽（讓 UI 快速響應）
-        const originalCanvas = document.createElement('canvas');
-        originalCanvas.width = width;
-        originalCanvas.height = height;
-        const originalCtx = originalCanvas.getContext('2d');
-
-        if (originalCtx) {
-          const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
-          originalCtx.putImageData(imageData, 0, 0);
-
-          // 產生縮圖（預覽用，不需要原始解析度）
-          const maxPreviewSize = 100;
-          const scale = Math.min(maxPreviewSize / width, maxPreviewSize / height, 1);
-          const previewCanvas = document.createElement('canvas');
-          previewCanvas.width = Math.round(width * scale);
-          previewCanvas.height = Math.round(height * scale);
-          const previewCtx = previewCanvas.getContext('2d');
-
-          if (previewCtx) {
-            previewCtx.drawImage(originalCanvas, 0, 0, previewCanvas.width, previewCanvas.height);
-            const previewUrl = previewCanvas.toDataURL('image/png');
-
-            // 先更新預覽圖（讓用戶立即看到）
-            const item = attachedImages.value.find(img => img.id === id);
-            if (item) {
-              item.previewUrl = previewUrl;
-            }
-          }
-
-          // 然後在背景儲存到臨時檔案
-          // 使用 originalCanvas 取得 PNG blob，避免 Array.from 複製
-          const blob = await new Promise<Blob>((resolve, reject) => {
-            originalCanvas.toBlob(b => b ? resolve(b) : reject(new Error('Failed to create blob')), 'image/png');
-          });
-          const arrayBuffer = await blob.arrayBuffer();
-          const pngData = Array.from(new Uint8Array(arrayBuffer));
-
-          const filePath = await invoke<string>('save_temp_image_png', {
-            pngData,
-          });
-
-          // 更新項目（移除 loading 狀態）
-          const item = attachedImages.value.find(img => img.id === id);
-          if (item) {
-            item.path = filePath;
-            item.isLoading = false;
-          }
-
-          console.log('📷 Image pasted:', filePath);
-        }
-      } catch (processErr) {
-        // 處理過程中出錯，移除 loading 項目
-        console.error('Failed to process clipboard image:', processErr);
-        const index = attachedImages.value.findIndex(img => img.id === id);
-        if (index !== -1) {
-          attachedImages.value.splice(index, 1);
-        }
-      }
+  // 找到圖片項目
+  let imageFile: File | null = null;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      imageFile = item.getAsFile();
+      break;
     }
+  }
+
+  if (!imageFile) return;
+
+  // 阻止預設貼上行為（不要把圖片內容貼到輸入框）
+  e.preventDefault();
+
+  // 產生唯一 ID 和時間戳記
+  const id = `img_${++imageIdCounter}_${Date.now()}`;
+  const timestamp = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const ext = imageFile.type.split('/')[1] || 'png';
+  const name = `截圖_${timestamp}.${ext}`;
+
+  // 立即加入 loading 狀態的項目
+  attachedImages.value.push({
+    id,
+    path: '',
+    name,
+    isTemp: true,
+    isLoading: true,
+  });
+
+  try {
+    // 產生預覽 URL（使用 createObjectURL 更快）
+    const previewUrl = URL.createObjectURL(imageFile);
+    const item = attachedImages.value.find(img => img.id === id);
+    if (item) {
+      item.previewUrl = previewUrl;
+    }
+
+    // 儲存到臨時檔案
+    const arrayBuffer = await imageFile.arrayBuffer();
+    const pngData = Array.from(new Uint8Array(arrayBuffer));
+
+    const filePath = await invoke<string>('save_temp_image_png', {
+      pngData,
+    });
+
+    // 更新項目（移除 loading 狀態）
+    if (item) {
+      item.path = filePath;
+      item.isLoading = false;
+    }
+
+    console.log('📷 Image pasted:', filePath);
   } catch (err) {
-    // 剪貼簿沒有圖片，讓預設行為處理（貼上文字）
-    console.log('No image in clipboard, allowing default paste');
+    // 處理過程中出錯，移除 loading 項目
+    console.error('Failed to process clipboard image:', err);
+    const index = attachedImages.value.findIndex(img => img.id === id);
+    if (index !== -1) {
+      attachedImages.value.splice(index, 1);
+    }
   }
 }
 
@@ -1713,11 +1851,22 @@ async function loadSkills() {
       source: 'builtin' as const,
     }));
 
-    // 合併：init skills + custom skills（去重）
+    // 前端特殊指令（由前端攔截處理，不送給 Claude）
+    const frontendCommands: SkillItem[] = [
+      {
+        name: 'remember',
+        description: '記住重要時刻。例如：/remember 今天終於把權限系統做完了！',
+        source: 'builtin' as const,
+      },
+    ];
+
+    // 合併：前端特殊指令 + init skills + custom skills（去重）
     const customNames = new Set(customSkills.map(s => s.name));
+    const frontendNames = new Set(frontendCommands.map(s => s.name));
     const mergedSkills = [
-      ...initSkills.filter(s => !customNames.has(s.name)),  // 排除已在自訂中的
-      ...customSkills,
+      ...frontendCommands,  // 前端特殊指令優先
+      ...initSkills.filter(s => !customNames.has(s.name) && !frontendNames.has(s.name)),
+      ...customSkills.filter(s => !frontendNames.has(s.name)),
     ];
 
     allSkills.value = mergedSkills;
@@ -2325,12 +2474,26 @@ async function interruptRequest() {
                   :oldCode="item.tool.input?.old_string as string"
                   :newCode="item.tool.input?.new_string as string"
                   :structuredPatch="item.tool.structuredPatch"
+                  :imageBase64="item.tool.imageBase64"
+                  :imageMediaType="item.tool.imageMediaType"
                   :rawInput="item.tool.input as Record<string, unknown>"
-                  :isRunning="!item.tool.result && !item.tool.isCancelled"
+                  :isRunning="!item.tool.result && !item.tool.isCancelled && !item.tool.imageBase64"
                   :isCancelled="item.tool.isCancelled"
                   :userResponse="item.tool.userResponse"
                   :ideConnected="filteredIdeClients.length > 0"
                 />
+              </div>
+
+              <!-- Skill 內容（摺疊顯示） -->
+              <div
+                v-else-if="item.type === 'text' && item.isSkill"
+                class="skill-content-wrapper"
+              >
+                <div class="skill-badge">
+                  <span class="skill-icon">📚</span>
+                  <span class="skill-name">{{ item.skillName }}</span>
+                  <span class="skill-dir">{{ item.skillDir }}</span>
+                </div>
               </div>
 
               <!-- 文字項目 -->
@@ -2894,6 +3057,40 @@ body {
     transform: translateY(-8px);
     opacity: 1;
   }
+}
+
+/* Skill 內容摺疊卡片 */
+.skill-content-wrapper {
+  margin: 4px 0;
+}
+
+.skill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(147, 51, 234, 0.15));
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 8px;
+  font-size: 0.9em;
+}
+
+.skill-icon {
+  font-size: 1.1em;
+}
+
+.skill-name {
+  font-weight: 600;
+  color: #a5b4fc;
+}
+
+.skill-dir {
+  font-size: 0.8em;
+  color: #6b7280;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 文字項目包裝（用於複製按鈕） */

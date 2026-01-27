@@ -43,6 +43,9 @@ pub enum ClaudeEvent {
         // Edit 工具的結構化差異（VS Code 風格 Diff View 用）
         #[serde(skip_serializing_if = "Option::is_none")]
         structured_patch: Option<serde_json::Value>,
+        // 圖片結果的 base64 資料（Read 工具讀取圖片時）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_base64: Option<String>,
     },
     // 完成
     Complete {
@@ -107,34 +110,95 @@ impl UserMessage {
     }
 }
 
+/// 建立 Claude CLI 的 Command
+/// Windows 上 .cmd 檔案無法正確處理多行參數，所以直接用 node 執行 cli.js
+fn create_claude_command() -> Command {
+    #[cfg(windows)]
+    {
+        // 檢查 npm 版本的 claude.cmd
+        if let Ok(cmd_path) = which::which("claude.cmd") {
+            // 從 claude.cmd 的路徑推算 cli.js 位置
+            // claude.cmd 位於 <nodejs>/claude.cmd
+            // cli.js 位於 <nodejs>/node_modules/@anthropic-ai/claude-code/cli.js
+            if let Some(dir) = cmd_path.parent() {
+                let cli_js = dir
+                    .join("node_modules")
+                    .join("@anthropic-ai")
+                    .join("claude-code")
+                    .join("cli.js");
+                if cli_js.exists() {
+                    println!("[Claude Path] 使用 node 執行: {:?}", cli_js);
+                    let mut cmd = Command::new("node");
+                    cmd.arg(cli_js);
+                    return cmd;
+                }
+            }
+        }
+        // 找不到 npm 版本，使用 .exe（native 版本）
+        if which::which("claude.exe").is_ok() {
+            println!("[Claude Path] 使用 claude.exe");
+            return Command::new("claude.exe");
+        }
+    }
+
+    // 非 Windows 或找不到 npm 版本時
+    let path = get_claude_path();
+    println!("[Claude Path] 使用: {}", path);
+    Command::new(path)
+}
+
 /// 取得 Claude CLI 執行檔路徑
-/// 依序嘗試多個可能的安裝位置
+/// 優先使用 PATH 中的版本（讓使用者可以透過 npm 降版），
+/// 找不到才 fallback 到固定安裝位置
 fn get_claude_path() -> String {
+    let result = get_claude_path_inner();
+    println!("[Claude Path] 使用: {}", result);
+    result
+}
+
+fn get_claude_path_inner() -> String {
+    // 優先使用 PATH 中的版本（支援 npm 版本控制）
+    #[cfg(windows)]
+    {
+        // 檢查 .cmd 是否存在（npm 版本），存在就返回命令名稱讓 Windows 自己執行
+        // 不用完整路徑，避免 batch file arguments 問題
+        if which::which("claude.cmd").is_ok() {
+            println!("[Claude Path] 找到 claude.cmd，使用命令名稱");
+            return "claude.cmd".to_string();
+        }
+        println!("[Claude Path] claude.cmd 未找到，嘗試 claude.exe");
+        if which::which("claude.exe").is_ok() {
+            println!("[Claude Path] 找到 claude.exe，使用命令名稱");
+            return "claude.exe".to_string();
+        }
+        println!("[Claude Path] claude.exe 未找到，嘗試固定位置");
+    }
+    #[cfg(not(windows))]
+    if let Ok(path) = which::which("claude") {
+        return path.to_string_lossy().to_string();
+    }
+
+    // PATH 中找不到，嘗試固定安裝位置
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 
     if let Some(home) = std::env::var_os(home_var) {
         let home_path = std::path::Path::new(&home);
 
         if cfg!(windows) {
-            // Windows: 依序嘗試
             let candidates = [
-                // 1. 新版原生 exe（推薦）
                 home_path.join(".local").join("bin").join("claude.exe"),
-                // 2. 舊版 .claude/local/
                 home_path.join(".claude").join("local").join("claude.cmd"),
             ];
 
             for path in candidates {
                 if path.exists() {
+                    println!("[Claude Path] 固定位置找到: {:?}", path);
                     return path.to_string_lossy().to_string();
                 }
             }
         } else {
-            // macOS/Linux
             let candidates = [
-                // 1. ~/.local/bin/claude
                 home_path.join(".local").join("bin").join("claude"),
-                // 2. ~/.claude/local/claude
                 home_path.join(".claude").join("local").join("claude"),
             ];
 
@@ -146,12 +210,9 @@ fn get_claude_path() -> String {
         }
     }
 
-    // Fallback: 依賴 PATH
-    if cfg!(windows) {
-        "claude.exe".to_string()
-    } else {
-        "claude".to_string()
-    }
+    // 最終 fallback - 讓系統嘗試找 claude
+    println!("[Claude Path] 使用 fallback: claude");
+    "claude".to_string()
 }
 
 /// GUI 環境系統提示（告訴 Claude 它在 GUI 環境 + 阿宇人格）
@@ -180,7 +241,7 @@ pub async fn start_claude(
 ) -> Result<(), String> {
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
-    let mut cmd = Command::new(get_claude_path());
+    let mut cmd = create_claude_command();
     cmd.arg("-p")
         .arg("--input-format")
         .arg("stream-json")
@@ -298,7 +359,7 @@ pub async fn run_claude(
 ) -> Result<(), String> {
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
-    let mut cmd = Command::new(get_claude_path());
+    let mut cmd = create_claude_command();
     cmd.arg("-p")
         .arg("--output-format")
         .arg("stream-json")
@@ -588,7 +649,56 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 // 提取 Edit 工具的 structuredPatch（用於 VS Code 風格 Diff View）
                 let structured_patch = tool_result.and_then(|tr| tr.get("structuredPatch").cloned());
 
-                events.push(ClaudeEvent::ToolResult { tool_id, result, is_error, structured_patch });
+                // 提取圖片的 base64 資料
+                let image_base64 = {
+                    // 方式 1：從 toolUseResult.file.base64 提取
+                    let from_tool_result = tool_result
+                        .and_then(|tr| tr.get("file"))
+                        .and_then(|f| f.get("base64"))
+                        .and_then(|b| b.as_str())
+                        .map(|s| s.to_string());
+
+                    // 方式 2：從 message.content[0].source.data 提取（Claude API 圖片格式）
+                    let from_content = content_item
+                        .and_then(|item| item.get("content"))
+                        .and_then(|c| c.as_array())
+                        .and_then(|arr| arr.first())
+                        .filter(|first| first.get("type").and_then(|t| t.as_str()) == Some("image"))
+                        .and_then(|img| img.get("source"))
+                        .and_then(|src| src.get("data"))
+                        .and_then(|d| d.as_str())
+                        .map(|s| s.to_string());
+
+                    // Debug: 印出圖片資料來源
+                    if from_tool_result.is_some() {
+                        println!("🖼️ image_base64 from tool_result.file.base64: {} bytes", from_tool_result.as_ref().unwrap().len());
+                    } else if from_content.is_some() {
+                        println!("🖼️ image_base64 from content[0].source.data: {} bytes", from_content.as_ref().unwrap().len());
+                    } else if result == "image" {
+                        // 如果 result 是 "image" 但沒找到 base64，印出原始資料結構
+                        println!("⚠️ result is 'image' but no base64 found!");
+                        if let Some(tr) = tool_result {
+                            println!("  tool_result keys: {:?}", tr.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                            if let Some(file) = tr.get("file") {
+                                println!("  file keys: {:?}", file.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                            }
+                        }
+                        if let Some(ci) = content_item {
+                            println!("  content_item keys: {:?}", ci.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                            if let Some(content) = ci.get("content") {
+                                if let Some(arr) = content.as_array() {
+                                    if let Some(first) = arr.first() {
+                                        println!("  content[0] keys: {:?}", first.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    from_tool_result.or(from_content)
+                };
+
+                events.push(ClaudeEvent::ToolResult { tool_id, result, is_error, structured_patch, image_base64 });
             }
         }
         "result" => {
@@ -600,29 +710,38 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 .and_then(|c| c.as_f64())
                 .unwrap_or(0.0);
 
-            // 解析 context window 相關欄位（支援蛇底式和駝峰式）
-            let total_tokens_in_conversation = json.get("total_tokens_in_conversation")
-                .or_else(|| json.get("totalTokensInConversation"))
-                .and_then(|v| v.as_u64());
+            // 計算 context window 使用量
+            // Claude CLI stream-json 格式不直接提供 context_window_used_percent，需要自己計算
 
-            let context_window_max = json.get("context_window_max")
-                .or_else(|| json.get("contextWindowMax"))
-                .or_else(|| json.get("max_context_tokens"))
-                .or_else(|| json.get("maxContextTokens"))
-                .and_then(|v| v.as_u64());
+            // 從 usage 中取得 token 數量
+            let usage = json.get("usage");
+            let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let cache_creation = usage.and_then(|u| u.get("cache_creation_input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let cache_read = usage.and_then(|u| u.get("cache_read_input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
 
-            let context_window_used_percent = json.get("context_window_used_percent")
-                .or_else(|| json.get("contextWindowUsedPercent"))
-                .and_then(|v| v.as_f64());
-            
-            // Debug: 印出完整的 result JSON 來檢查結構
-            eprintln!("🔍 Result JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-            // 額外印出完整 JSON 以便 debug
-            eprintln!("🔍 Full result JSON: {}", serde_json::to_string_pretty(json).unwrap_or_default());
-            // 印出解析到的 context 資訊
-            if total_tokens_in_conversation.is_some() || context_window_max.is_some() || context_window_used_percent.is_some() {
-                eprintln!("📊 Context info: tokens={:?}, max={:?}, percent={:?}",
-                    total_tokens_in_conversation, context_window_max, context_window_used_percent);
+            // 計算總 token 數（這是對話中實際使用的 context）
+            let total_tokens = input_tokens + cache_creation + cache_read + output_tokens;
+
+            // 從 modelUsage 中取得 context window 大小
+            let model_usage = json.get("modelUsage").and_then(|m| m.as_object());
+            let context_window_max = model_usage.and_then(|m| {
+                // 取第一個模型的 contextWindow
+                m.values().next().and_then(|v| v.get("contextWindow")).and_then(|c| c.as_u64())
+            });
+
+            // 計算使用百分比
+            let (total_tokens_in_conversation, context_window_used_percent) = if let Some(max) = context_window_max {
+                let percent = (total_tokens as f64 / max as f64) * 100.0;
+                (Some(total_tokens), Some(percent))
+            } else {
+                (if total_tokens > 0 { Some(total_tokens) } else { None }, None)
+            };
+
+            // Debug: 印出 context 資訊
+            if total_tokens > 0 {
+                eprintln!("📊 Context usage: {} tokens / {:?} max = {:?}%",
+                    total_tokens, context_window_max, context_window_used_percent);
             }
 
             // 檢查是否有權限被拒絕（支援蛇底式和駝峰式）
