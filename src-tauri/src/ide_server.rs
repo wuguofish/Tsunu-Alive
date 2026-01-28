@@ -504,6 +504,7 @@ mod tests {
             language_id: Some("rust".to_string()),
             diagnostics: vec![],
             last_updated: None,
+            client_id: None,
         };
 
         let json = serde_json::to_string(&ctx).unwrap();
@@ -596,6 +597,7 @@ mod tests {
                 },
             ],
             last_updated: Some("2026-01-23T12:00:00Z".to_string()),
+            client_id: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(json.contains("warning"));

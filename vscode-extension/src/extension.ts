@@ -5,6 +5,9 @@
 
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
+import { spawn } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
 
 // ============================================================================
 // 類型定義
@@ -62,7 +65,8 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('tsunu-alive.connect', connect),
         vscode.commands.registerCommand('tsunu-alive.disconnect', disconnect),
-        vscode.commands.registerCommand('tsunu-alive.sendContext', sendCurrentContext)
+        vscode.commands.registerCommand('tsunu-alive.sendContext', sendCurrentContext),
+        vscode.commands.registerCommand('tsunu-alive.launch', launchTsunuAlive)
     );
 
     // 監聽編輯器事件
@@ -80,6 +84,103 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
     disconnect();
+}
+
+// ============================================================================
+// 啟動 Tsunu Alive
+// ============================================================================
+
+function launchTsunuAlive() {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // 取得執行檔路徑
+    const execPath = findTsunuAliveExecutable();
+    if (!execPath) {
+        vscode.window.showErrorMessage(
+            '找不到 Tsunu Alive 執行檔。請在設定中指定路徑，或確認已正確安裝。'
+        );
+        return;
+    }
+
+    // 建立啟動參數
+    const args: string[] = [];
+    if (workspaceFolder) {
+        args.push('--project', workspaceFolder);
+    }
+
+    console.log(`啟動 Tsunu Alive: ${execPath} ${args.join(' ')}`);
+
+    try {
+        // 啟動程式（detached 讓它獨立運行）
+        const child = spawn(execPath, args, {
+            detached: true,
+            stdio: 'ignore',
+            cwd: workspaceFolder || undefined
+        });
+
+        child.unref(); // 讓 VS Code 不用等待子程序
+
+        vscode.window.showInformationMessage(
+            `🚀 已啟動 Tsunu Alive${workspaceFolder ? ` (專案: ${path.basename(workspaceFolder)})` : ''}`
+        );
+    } catch (error) {
+        vscode.window.showErrorMessage(`啟動 Tsunu Alive 失敗: ${error}`);
+    }
+}
+
+function findTsunuAliveExecutable(): string | null {
+    const config = vscode.workspace.getConfiguration('tsunuAlive');
+    const configPath = config.get<string>('executablePath', '');
+
+    // 優先使用設定中的路徑
+    if (configPath && fs.existsSync(configPath)) {
+        return configPath;
+    }
+
+    // 自動尋找常見安裝位置
+    const homeDir = process.env.USERPROFILE || process.env.HOME || '';
+    const isWindows = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+
+    const candidates: string[] = [];
+
+    if (isWindows) {
+        // Windows 安裝位置
+        candidates.push(
+            path.join(homeDir, 'AppData', 'Local', 'tsunu-alive', 'tsunu_alive.exe'),
+            path.join(homeDir, '.local', 'bin', 'tsunu_alive.exe'),
+        );
+    } else if (isMac) {
+        // macOS 安裝位置
+        candidates.push(
+            '/Applications/Tsunu Alive.app/Contents/MacOS/tsunu_alive',
+            path.join(homeDir, 'Applications', 'Tsunu Alive.app', 'Contents', 'MacOS', 'tsunu_alive'),
+            path.join(homeDir, '.local', 'bin', 'tsunu_alive'),
+            '/usr/local/bin/tsunu_alive',
+        );
+    } else {
+        // Linux
+        candidates.push(
+            path.join(homeDir, '.local', 'bin', 'tsunu_alive'),
+            '/usr/local/bin/tsunu_alive',
+        );
+    }
+
+    // 開發模式位置（跨平台）
+    const devDebug = path.join(__dirname, '..', '..', 'src-tauri', 'target', 'debug',
+        isWindows ? 'tsunu_alive_temp.exe' : 'tsunu_alive_temp');
+    const devRelease = path.join(__dirname, '..', '..', 'src-tauri', 'target', 'release',
+        isWindows ? 'tsunu_alive.exe' : 'tsunu_alive');
+    candidates.push(devDebug, devRelease);
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+            console.log(`找到 Tsunu Alive: ${candidate}`);
+            return candidate;
+        }
+    }
+
+    return null;
 }
 
 // ============================================================================

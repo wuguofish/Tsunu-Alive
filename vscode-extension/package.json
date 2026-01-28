@@ -28,8 +28,21 @@
       {
         "command": "tsunu-alive.sendContext",
         "title": "Tsunu Alive: 發送當前 Context"
+      },
+      {
+        "command": "tsunu-alive.launch",
+        "title": "Tsunu Alive: 啟動阿宇",
+        "icon": "resources/icon.png"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "tsunu-alive.launch",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Tsunu Alive",
       "properties": {
@@ -42,6 +55,11 @@
           "type": "boolean",
           "default": true,
           "description": "啟動時自動連接"
+        },
+        "tsunuAlive.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Tsunu Alive 執行檔路徑（留空則自動尋找）"
         }
       }
     }
