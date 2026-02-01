@@ -2533,6 +2533,22 @@ async function interruptRequest() {
                 </div>
               </div>
 
+              <!-- Compact 摘要（可收合） -->
+              <div
+                v-else-if="item.type === 'compact'"
+                class="compact-summary-wrapper"
+              >
+                <div class="compact-header" @click="($event.currentTarget as HTMLElement)?.parentElement?.classList.toggle('expanded')">
+                  <span class="compact-icon">📦</span>
+                  <span class="compact-label">對話已壓縮</span>
+                  <span class="compact-hint">點擊查看摘要</span>
+                  <span class="compact-chevron">▸</span>
+                </div>
+                <div class="compact-body">
+                  <div class="message-content markdown-body" v-html="renderMarkdown(item.summary)"></div>
+                </div>
+              </div>
+
               <!-- 文字項目 -->
               <div
                 v-else-if="item.type === 'text' && item.content"
@@ -2703,7 +2719,8 @@ async function interruptRequest() {
           </button>
           <button class="status-btn context-usage" v-if="contextUsage"
             :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
-            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}` : 'Context usage'">
+            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}\n點擊執行 /compact` : '點擊執行 /compact'"
+            @click="executeSlashCommand('/compact')">
             <span class="usage-icon">{{ contextUsageIcon }}</span>
             <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
           </button>
@@ -3141,6 +3158,73 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Compact 摘要（可收合） */
+.compact-summary-wrapper {
+  margin: 8px 0;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.08);
+  overflow: hidden;
+}
+
+.compact-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.compact-header:hover {
+  background: rgba(251, 191, 36, 0.12);
+}
+
+.compact-icon {
+  font-size: 1.1em;
+}
+
+.compact-label {
+  font-weight: 600;
+  color: #fbbf24;
+  font-size: 0.9em;
+}
+
+.compact-hint {
+  font-size: 0.75em;
+  color: var(--text-muted, #a0a0a0);
+}
+
+.compact-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+  font-size: 0.9em;
+}
+
+.compact-summary-wrapper.expanded .compact-chevron {
+  transform: rotate(90deg);
+}
+
+.compact-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.compact-summary-wrapper.expanded .compact-body {
+  max-height: 2000px;
+}
+
+.compact-body .message-content {
+  padding: 0 14px 12px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  border-top: 1px solid rgba(251, 191, 36, 0.15);
+  padding-top: 10px;
 }
 
 /* 文字項目包裝（用於複製按鈕） */

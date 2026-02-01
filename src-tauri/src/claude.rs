@@ -59,6 +59,10 @@ pub enum ClaudeEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         context_window_used_percent: Option<f64>,
     },
+    // Compact 完成（對話摘要壓縮）
+    Compacted {
+        summary: String,
+    },
     // 錯誤
     Error {
         message: String,
@@ -501,6 +505,9 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                             slash_commands,
                         });
                     }
+                } else if subtype == "compact_boundary" {
+                    eprintln!("📦 Compact boundary detected");
+                    // compact_boundary 本身不帶摘要，摘要在後續的 user 訊息中
                 }
             } else if let (Some(session_id), model) = (
                 json.get("session_id").and_then(|s| s.as_str()),
@@ -559,6 +566,26 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "user" => {
+            // 檢查是否是 Compact 摘要
+            let is_compact_summary = json.get("isCompactSummary")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if is_compact_summary {
+                // 提取 Compact 摘要內容
+                let summary = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if !summary.is_empty() {
+                    eprintln!("📦 Compact summary received ({} chars)", summary.len());
+                    events.push(ClaudeEvent::Compacted { summary });
+                }
+                return events;
+            }
+
             // 工具結果（支援 toolUseResult 和 tool_use_result 兩種格式）
             let tool_result = json.get("toolUseResult")
                 .or_else(|| json.get("tool_use_result"));

@@ -270,6 +270,64 @@ pub fn install_vscode_extension(app: tauri::AppHandle) -> Result<String, String>
     }
 }
 
+/// 設定全域 ~/.claude/settings.json（讓 hooks 在所有專案都生效）
+fn configure_global_claude_settings(home: &PathBuf, hooks_dir: &PathBuf) -> Result<(), String> {
+    let settings_path = home.join(".claude").join("settings.json");
+
+    // 讀取現有設定
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .map_err(|e| format!("Failed to read global settings.json: {}", e))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // 建構 hook command（使用絕對路徑）
+    let hook_script = hooks_dir.join("check-compact.ps1");
+    let hook_command = if cfg!(target_os = "windows") {
+        format!(
+            "powershell.exe -ExecutionPolicy Bypass -File \"{}\"",
+            hook_script.to_string_lossy()
+        )
+    } else {
+        let sh_script = hooks_dir.join("check-compact.sh");
+        format!("bash \"{}\"", sh_script.to_string_lossy())
+    };
+
+    // 建構 hooks 設定
+    let hook_entry = serde_json::json!({
+        "type": "command",
+        "command": hook_command
+    });
+
+    let user_prompt_submit = serde_json::json!([{
+        "matcher": "",
+        "hooks": [hook_entry]
+    }]);
+
+    // 合併到現有設定（保留其他 hook 設定）
+    let obj = settings.as_object_mut()
+        .ok_or_else(|| "Global settings.json is not an object".to_string())?;
+
+    // 取得或建立 hooks 物件
+    let hooks = obj.entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+
+    if let Some(hooks_obj) = hooks.as_object_mut() {
+        hooks_obj.insert("UserPromptSubmit".to_string(), user_prompt_submit);
+    }
+
+    // 寫回
+    let output = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    fs::write(&settings_path, output)
+        .map_err(|e| format!("Failed to write global settings.json: {}", e))?;
+
+    eprintln!("✅ Global Claude settings configured: {}", settings_path.display());
+    Ok(())
+}
+
 /// 安裝 Claude Code Skill（複製到全域位置）
 #[tauri::command]
 pub fn install_skill(app: tauri::AppHandle) -> Result<String, String> {
@@ -291,11 +349,16 @@ pub fn install_skill(app: tauri::AppHandle) -> Result<String, String> {
 
     // 也安裝 hooks（如果有的話）
     let hooks_source = bundled_dir.join("hooks");
+    let hooks_dest = home.join(".claude").join("hooks");
     if hooks_source.exists() {
-        let hooks_dest = home.join(".claude").join("hooks");
         fs::create_dir_all(&hooks_dest)
             .map_err(|e| format!("Failed to create hooks dir: {}", e))?;
         copy_dir_recursive(&hooks_source, &hooks_dest)?;
+    }
+
+    // 設定全域 ~/.claude/settings.json，讓 hook 在所有專案都生效
+    if let Err(e) = configure_global_claude_settings(&home, &hooks_dest) {
+        eprintln!("Warning: skill installed but failed to configure global settings: {}", e);
     }
 
     Ok("Claude Code Skill installed successfully".to_string())

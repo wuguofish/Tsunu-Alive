@@ -14,7 +14,7 @@ export interface DiffHunk {
 
 // Claude CLI 事件類型
 export interface ClaudeEvent {
-  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied';
+  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied' | 'Compacted';
   session_id?: string;
   model?: string;
   // 可用的 Skills（Init 事件）
@@ -36,6 +36,8 @@ export interface ClaudeEvent {
   // 圖片結果的 base64 資料（Read 工具讀取圖片時，ToolResult 事件）
   image_base64?: string;
   image_media_type?: string;  // 例如 'image/png', 'image/jpeg'
+  // Compact 摘要（Compacted 事件）
+  summary?: string;
 }
 
 // 待確認的權限請求
@@ -66,7 +68,8 @@ export interface ToolUseItem {
 // 對話項目（文字或工具，按時間順序）
 export type ChatItem =
   | { type: 'text'; content: string; isSkill?: boolean; skillName?: string; skillDir?: string }
-  | { type: 'tool'; tool: ToolUseItem };
+  | { type: 'tool'; tool: ToolUseItem }
+  | { type: 'compact'; summary: string };
 
 // 訊息類型
 export interface Message {
@@ -582,6 +585,36 @@ export function handleConnectedEvent(
 }
 
 /**
+ * 處理 Compacted 事件（對話摘要壓縮完成）
+ */
+export function handleCompactedEvent(
+  event: ClaudeEvent,
+  state: AppState
+): EventHandlerResult {
+  const summary = event.summary || '';
+
+  // 將 compact 摘要加入 assistant 訊息
+  const messages = [...state.messages];
+  messages.push({
+    role: 'assistant',
+    items: [{ type: 'compact', summary }],
+  });
+
+  return {
+    stateUpdates: {
+      messages,
+      busyStatus: '',
+      avatarState: 'complete' as AvatarState,
+    },
+    actions: [
+      { type: 'scrollToBottom' },
+      { type: 'stopBusyTextAnimation' },
+      { type: 'startCompleteTimer' },
+    ],
+  };
+}
+
+/**
  * 主要事件處理函數
  */
 export function handleClaudeEvent(
@@ -599,6 +632,8 @@ export function handleClaudeEvent(
       return handlePermissionDeniedEvent(event, state);
     case 'ToolResult':
       return handleToolResultEvent(event, state);
+    case 'Compacted':
+      return handleCompactedEvent(event, state);
     case 'Complete':
       return handleCompleteEvent(event, state);
     case 'Error':
