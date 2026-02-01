@@ -10,6 +10,7 @@ import PlanApprovalDialog from "./components/PlanApprovalDialog.vue";
 import AskUserQuestionDialog from "./components/AskUserQuestionDialog.vue";
 import SessionSelector from "./components/SessionSelector.vue";
 import ImagePreview, { type AttachedImage } from "./components/ImagePreview.vue";
+import SetupWizard from "./components/SetupWizard.vue";
 import { useTabManager } from "./composables/useTabManager";
 import { renderMarkdown } from "./utils/markdown";
 import {
@@ -423,6 +424,9 @@ const contextUsageIcon = computed(() => {
 
 // 斜線選單顯示狀態
 const showSlashMenu = ref(false);
+
+// 首次啟動安裝精靈
+const showSetupWizard = ref(false);
 
 // 歷史對話相關
 interface SessionItem {
@@ -1139,6 +1143,16 @@ onMounted(async () => {
 
   // 開始輪詢 IDE 狀態
   startIdeStatusPolling();
+
+  // 首次啟動檢查
+  try {
+    const setupDone = await invoke<boolean>('check_setup_done');
+    if (!setupDone) {
+      showSetupWizard.value = true;
+    }
+  } catch (e) {
+    console.error('Failed to check setup status:', e);
+  }
 });
 
 // 元件卸載時清理
@@ -2753,6 +2767,9 @@ async function interruptRequest() {
         <button class="toast-close" @click="toastVisible = false">&times;</button>
       </div>
     </Transition>
+
+    <!-- 首次啟動安裝精靈 -->
+    <SetupWizard v-if="showSetupWizard" @close="showSetupWizard = false" />
   </div>
 </template>
 

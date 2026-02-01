@@ -1,6 +1,7 @@
 mod claude;
 mod ide_server;
 mod permission_server;
+mod setup;
 
 use std::sync::{Arc, OnceLock};
 use std::path::PathBuf;
@@ -1581,7 +1582,12 @@ pub fn run() {
             cleanup_temp_image,
             read_memories,
             write_memory,
-            delete_memory
+            delete_memory,
+            setup::check_addon_status,
+            setup::install_vscode_extension,
+            setup::install_skill,
+            setup::check_setup_done,
+            setup::mark_setup_done
         ])
         .setup(move |app| {
             // 安裝 PermissionRequest Hook

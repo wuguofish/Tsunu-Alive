@@ -25,5 +25,5 @@ dist-ssr
 .claude/settings.local.json
 /assets/character/origin
 /src-tauri/.claude
-.claude/settings.local.json
+/src-tauri/resources/bundled
 .claude/settings.local.json
