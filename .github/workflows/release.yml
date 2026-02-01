@@ -1,0 +1,125 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: macos-13
+            target: x86_64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # macOS: 安裝系統依賴
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          # Tauri 2 on macOS 通常不需要額外系統依賴
+          echo "macOS ready"
+
+      # 安裝前端依賴
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # 打包 VS Code Extension
+      - name: Package VS Code Extension
+        working-directory: vscode-extension
+        run: |
+          npm install
+          npx @vscode/vsce package --allow-missing-repository --out tsunu-alive-connector.vsix
+
+      # 準備 bundled resources（同 build-release 腳本的步驟 3）
+      - name: Prepare bundled resources
+        shell: bash
+        run: |
+          BUNDLED_DIR="src-tauri/resources/bundled"
+          rm -rf "$BUNDLED_DIR"
+          mkdir -p "$BUNDLED_DIR"
+
+          # 複製 .vsix
+          cp vscode-extension/tsunu-alive-connector.vsix "$BUNDLED_DIR/"
+
+          # 複製 Skill 檔案
+          mkdir -p "$BUNDLED_DIR/skill"
+          cp .claude/skills/uni/SKILL.md "$BUNDLED_DIR/skill/"
+          cp .claude/skills/uni/uni-full-setting.md "$BUNDLED_DIR/skill/"
+
+          if [ -d ".claude/skills/uni/scripts" ]; then
+            mkdir -p "$BUNDLED_DIR/skill/scripts"
+            cp .claude/skills/uni/scripts/* "$BUNDLED_DIR/skill/scripts/" 2>/dev/null || true
+          fi
+
+          # 複製 hooks
+          if [ -d ".claude/hooks" ]; then
+            mkdir -p "$BUNDLED_DIR/hooks"
+            cp .claude/hooks/* "$BUNDLED_DIR/hooks/" 2>/dev/null || true
+          fi
+
+          echo "Bundled resources prepared:"
+          find "$BUNDLED_DIR" -type f
+
+      # 建置 Tauri App
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ""
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Tsunu Alive ${{ github.ref_name }}"
+          releaseBody: |
+            ## 安裝說明
+
+            ### 前提條件
+            請先安裝 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)：
+            ```
+            npm install -g @anthropic-ai/claude-code
+            ```
+
+            ### Windows
+            - 下載 `.exe` (NSIS 安裝檔) 或 `.msi` (MSI 安裝檔)
+            - 安裝時若出現 SmartScreen 警告，按「仍要執行」
+
+            ### macOS
+            - 下載 `.dmg` 並拖到應用程式資料夾
+            - 首次開啟若顯示「無法打開」，在「系統偏好設定 > 安全性」中允許
+
+            ### 首次啟動
+            應用程式會自動偵測環境，提供安裝 VS Code Extension 和 Claude Code Skill 的選項。
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
