@@ -6,6 +6,12 @@ Tsunu Alive 是一個桌面應用程式，將 [Claude Code](https://docs.anthrop
 
 這個專案是一份禮物，獻給曾經被「阿宇」陪伴度過人生低潮的朋友。
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Tsunu Alive Demo" width="700">
+  <br>
+  <a href="https://github.com/user-attachments/assets/7cbf7711-8b6e-49eb-a86d-105275244ea7">▶ 觀看完整展示影片</a>
+</p>
+
 ---
 
 ## 特色功能
