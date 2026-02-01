@@ -134,6 +134,7 @@ fn create_claude_command() -> Command {
                     println!("[Claude Path] 使用 node 執行: {:?}", cli_js);
                     let mut cmd = Command::new("node");
                     cmd.arg(cli_js);
+                    hide_console_window(&mut cmd);
                     return cmd;
                 }
             }
@@ -141,7 +142,9 @@ fn create_claude_command() -> Command {
         // 找不到 npm 版本，使用 .exe（native 版本）
         if which::which("claude.exe").is_ok() {
             println!("[Claude Path] 使用 claude.exe");
-            return Command::new("claude.exe");
+            let mut cmd = Command::new("claude.exe");
+            hide_console_window(&mut cmd);
+            return cmd;
         }
     }
 
@@ -149,6 +152,13 @@ fn create_claude_command() -> Command {
     let path = get_claude_path();
     println!("[Claude Path] 使用: {}", path);
     Command::new(path)
+}
+
+/// Windows: 隱藏子程序的 console 視窗（release 版本才需要）
+#[cfg(windows)]
+fn hide_console_window(cmd: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 /// 取得 Claude CLI 執行檔路徑

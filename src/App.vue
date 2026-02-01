@@ -3,6 +3,7 @@ import { ref, nextTick, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { File, Folder, Paperclip, Copy, Check, Square, Slash, FolderOpen } from "lucide-vue-next";
 import ToolIndicator from "./components/ToolIndicator.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
@@ -542,6 +543,17 @@ async function copyToClipboard(content: string, itemKey: string) {
     }, 2000);
   } catch (err) {
     console.error('Failed to copy:', err);
+  }
+}
+
+// 攔截外部超連結，改在系統瀏覽器開啟
+function handleExternalLinkClick(e: MouseEvent) {
+  const target = (e.target as HTMLElement).closest('a');
+  if (!target) return;
+  const href = target.getAttribute('href');
+  if (href && /^https?:\/\//.test(href)) {
+    e.preventDefault();
+    openUrl(href).catch(err => console.error('Failed to open URL:', err));
   }
 }
 
@@ -2477,7 +2489,7 @@ async function interruptRequest() {
       <!-- 左側：對話區域 -->
       <div class="chat-section">
         <!-- 對話訊息 -->
-        <div class="chat-container" ref="chatContainer">
+        <div class="chat-container" ref="chatContainer" @click="handleExternalLinkClick">
           <div
             v-for="(msg, msgIndex) in messages"
             :key="msgIndex"
