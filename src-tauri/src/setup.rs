@@ -170,6 +170,75 @@ pub fn check_addon_status() -> AddonStatus {
     }
 }
 
+/// 取得 VS Code 的 settings.json 路徑
+fn get_vscode_settings_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA").ok()
+            .map(|appdata| PathBuf::from(appdata).join("Code").join("User").join("settings.json"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("Code")
+                .join("User")
+                .join("settings.json")
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        home_dir().map(|home| {
+            home.join(".config")
+                .join("Code")
+                .join("User")
+                .join("settings.json")
+        })
+    }
+}
+
+/// 在 VS Code settings.json 中設定 tsunuAlive.executablePath
+fn configure_vscode_executable_path() -> Result<(), String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to get current exe path: {}", e))?;
+    let exe_str = exe_path.to_string_lossy().to_string();
+
+    let settings_path = get_vscode_settings_path()
+        .ok_or_else(|| "Cannot determine VS Code settings.json path".to_string())?;
+
+    // 讀取現有設定（若不存在則用空物件）
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .map_err(|e| format!("Failed to read settings.json: {}", e))?;
+        // 嘗試解析 JSON（VS Code settings 可能有 trailing comma 等，先試 serde）
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        // 確保目錄存在
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create settings dir: {}", e))?;
+        }
+        serde_json::json!({})
+    };
+
+    // 設定 executablePath
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert(
+            "tsunuAlive.executablePath".to_string(),
+            serde_json::Value::String(exe_str),
+        );
+    }
+
+    // 寫回（pretty print）
+    let output = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    fs::write(&settings_path, output)
+        .map_err(|e| format!("Failed to write settings.json: {}", e))?;
+
+    Ok(())
+}
+
 /// 安裝 VS Code Extension（從 bundled resource）
 #[tauri::command]
 pub fn install_vscode_extension(app: tauri::AppHandle) -> Result<String, String> {
@@ -189,6 +258,11 @@ pub fn install_vscode_extension(app: tauri::AppHandle) -> Result<String, String>
         .map_err(|e| format!("Failed to run VS Code CLI: {}", e))?;
 
     if output.status.success() {
+        // Extension 安裝成功後，自動設定執行檔路徑
+        if let Err(e) = configure_vscode_executable_path() {
+            eprintln!("Warning: extension installed but failed to configure path: {}", e);
+            // 不影響整體安裝結果，只是路徑需要手動設定
+        }
         Ok("VS Code Extension installed successfully".to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);

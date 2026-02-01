@@ -428,6 +428,28 @@ const showSlashMenu = ref(false);
 // 首次啟動安裝精靈
 const showSetupWizard = ref(false);
 
+// 附加組件安裝狀態
+interface AddonStatus {
+  vscode_available: boolean;
+  vscode_installed: boolean;
+  claude_available: boolean;
+  skill_installed: boolean;
+}
+const addonStatus = ref<AddonStatus | null>(null);
+const hasUninstalledAddons = computed(() => {
+  if (!addonStatus.value) return false;
+  const s = addonStatus.value;
+  return (s.vscode_available && !s.vscode_installed) || !s.skill_installed;
+});
+
+async function refreshAddonStatus() {
+  try {
+    addonStatus.value = await invoke<AddonStatus>('check_addon_status');
+  } catch (e) {
+    console.error('Failed to check addon status:', e);
+  }
+}
+
 // 歷史對話相關
 interface SessionItem {
   session_id: string;
@@ -1144,7 +1166,8 @@ onMounted(async () => {
   // 開始輪詢 IDE 狀態
   startIdeStatusPolling();
 
-  // 首次啟動檢查
+  // 附加組件狀態偵測（同時用於首次啟動判斷和狀態列顯示）
+  await refreshAddonStatus();
   try {
     const setupDone = await invoke<boolean>('check_setup_done');
     if (!setupDone) {
@@ -2668,6 +2691,16 @@ async function interruptRequest() {
             <span v-if="ideContextDisplay" class="ide-context clickable" @click.stop="insertIdeContextReference" title="點擊插入檔案參考">{{ ideContextDisplay }}</span>
             <span v-if="ideSelectionDisplay" class="ide-selection">{{ ideSelectionDisplay }}</span>
           </button>
+          <button
+            v-if="hasUninstalledAddons"
+            class="status-btn addon-status"
+            @click="showSetupWizard = true"
+            title="有附加組件尚未安裝，點擊開啟安裝精靈"
+          >
+            <span class="addon-icon">⚙</span>
+            <span class="addon-text">附加組件</span>
+            <span class="addon-dot"></span>
+          </button>
           <button class="status-btn context-usage" v-if="contextUsage"
             :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
             :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}` : 'Context usage'">
@@ -2769,7 +2802,7 @@ async function interruptRequest() {
     </Transition>
 
     <!-- 首次啟動安裝精靈 -->
-    <SetupWizard v-if="showSetupWizard" @close="showSetupWizard = false" />
+    <SetupWizard v-if="showSetupWizard" @close="showSetupWizard = false; refreshAddonStatus()" />
   </div>
 </template>
 
@@ -3436,6 +3469,31 @@ textarea:disabled {
   padding: 1px 6px;
   border-radius: 3px;
   margin-left: 4px;
+}
+
+/* 附加組件按鈕 */
+.addon-status {
+  color: #ff9f43;
+  position: relative;
+}
+
+.addon-status:hover {
+  color: #ffb86c;
+}
+
+.addon-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff9f43;
+  display: inline-block;
+  margin-left: 2px;
+  animation: addon-pulse 2s ease-in-out infinite;
+}
+
+@keyframes addon-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 @keyframes ide-connected {
