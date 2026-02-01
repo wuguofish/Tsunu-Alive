@@ -1,11 +1,11 @@
-# build-release.ps1 - Tsunu Alive 完整建置腳本（Windows）
+# build-release.ps1 - Tsunu Alive full build script (Windows)
 #
-# 打包 Tauri App + VS Code Extension + Claude Code Skill
-# 輸出：src-tauri/target/release/bundle/ 中的安裝檔
+# Packages Tauri App + VS Code Extension + Claude Code Skill
+# Output: installer in src-tauri/target/release/bundle/
 
 param(
-    [switch]$SkipFrontend,  # 跳過前端建置（已建置過時）
-    [switch]$Debug          # Debug 模式建置
+    [switch]$SkipFrontend,  # Skip frontend build
+    [switch]$Debug          # Debug mode build
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +14,7 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Write-Host "=== Tsunu Alive Build Release ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot"
 
-# 1. 確認必要工具
+# 1. Check prerequisites
 Write-Host "`n[1/5] Checking prerequisites..." -ForegroundColor Yellow
 
 $requiredTools = @("node", "npm", "cargo")
@@ -25,7 +25,7 @@ foreach ($tool in $requiredTools) {
     }
 }
 
-# 2. 打包 VS Code Extension
+# 2. Package VS Code Extension
 Write-Host "`n[2/5] Packaging VS Code Extension..." -ForegroundColor Yellow
 $vsceDir = Join-Path $ProjectRoot "vscode-extension"
 
@@ -42,31 +42,31 @@ try {
     Pop-Location
 }
 
-# 3. 準備 bundled resources
+# 3. Prepare bundled resources
 Write-Host "`n[3/5] Preparing bundled resources..." -ForegroundColor Yellow
-$bundledDir = Join-Path $ProjectRoot "src-tauri" "resources" "bundled"
+$bundledDir = Join-Path (Join-Path (Join-Path $ProjectRoot "src-tauri") "resources") "bundled"
 
-# 清除舊的 bundled 目錄
+# Clean old bundled directory
 if (Test-Path $bundledDir) {
     Remove-Item -Path $bundledDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $bundledDir -Force | Out-Null
 
-# 複製 .vsix
+# Copy .vsix
 $vsixSource = Join-Path $vsceDir "tsunu-alive-connector.vsix"
 Copy-Item $vsixSource -Destination (Join-Path $bundledDir "tsunu-alive-connector.vsix")
 Write-Host "  -> Copied .vsix to bundled/" -ForegroundColor Green
 
-# 複製 Skill 檔案
-$skillSource = Join-Path $ProjectRoot ".claude" "skills" "uni"
+# Copy Skill files
+$skillSource = Join-Path (Join-Path (Join-Path $ProjectRoot ".claude") "skills") "uni"
 $skillDest = Join-Path $bundledDir "skill"
 New-Item -ItemType Directory -Path $skillDest -Force | Out-Null
 
-# 複製 SKILL.md 和 uni-full-setting.md
+# Copy SKILL.md and uni-full-setting.md
 Copy-Item (Join-Path $skillSource "SKILL.md") -Destination $skillDest
 Copy-Item (Join-Path $skillSource "uni-full-setting.md") -Destination $skillDest
 
-# 複製 scripts 子目錄
+# Copy scripts subdirectory
 $scriptsSource = Join-Path $skillSource "scripts"
 if (Test-Path $scriptsSource) {
     $scriptsDest = Join-Path $skillDest "scripts"
@@ -74,8 +74,8 @@ if (Test-Path $scriptsSource) {
     Copy-Item (Join-Path $scriptsSource "*") -Destination $scriptsDest -Recurse
 }
 
-# 複製 hooks
-$hooksSource = Join-Path $ProjectRoot ".claude" "hooks"
+# Copy hooks
+$hooksSource = Join-Path (Join-Path $ProjectRoot ".claude") "hooks"
 if (Test-Path $hooksSource) {
     $hooksDest = Join-Path $bundledDir "hooks"
     New-Item -ItemType Directory -Path $hooksDest -Force | Out-Null
@@ -84,7 +84,7 @@ if (Test-Path $hooksSource) {
 
 Write-Host "  -> Copied skill files to bundled/skill/" -ForegroundColor Green
 
-# 4. 安裝前端依賴
+# 4. Install frontend dependencies
 Write-Host "`n[4/5] Installing dependencies..." -ForegroundColor Yellow
 Push-Location $ProjectRoot
 try {
@@ -93,7 +93,7 @@ try {
     Pop-Location
 }
 
-# 5. 建置 Tauri App
+# 5. Build Tauri App
 Write-Host "`n[5/5] Building Tauri application..." -ForegroundColor Yellow
 Push-Location $ProjectRoot
 try {
@@ -106,11 +106,11 @@ try {
     Pop-Location
 }
 
-# 輸出結果
+# Output results
 Write-Host "`n=== Build Complete ===" -ForegroundColor Green
-$bundleDir = Join-Path $ProjectRoot "src-tauri" "target" "release" "bundle"
+$bundleDir = Join-Path (Join-Path (Join-Path (Join-Path $ProjectRoot "src-tauri") "target") "release") "bundle"
 if ($Debug) {
-    $bundleDir = Join-Path $ProjectRoot "src-tauri" "target" "debug" "bundle"
+    $bundleDir = Join-Path (Join-Path (Join-Path (Join-Path $ProjectRoot "src-tauri") "target") "debug") "bundle"
 }
 
 if (Test-Path $bundleDir) {
@@ -122,7 +122,7 @@ if (Test-Path $bundleDir) {
     }
 }
 
-# 清理 vsix 暫存檔
+# Clean up temp vsix
 Remove-Item (Join-Path $vsceDir "tsunu-alive-connector.vsix") -ErrorAction SilentlyContinue
 
 Write-Host "`nDone!" -ForegroundColor Cyan

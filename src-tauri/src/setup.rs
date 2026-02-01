@@ -38,23 +38,47 @@ fn home_dir() -> Option<PathBuf> {
 
 /// 尋找 VS Code CLI 路徑
 fn find_vscode_cli() -> Option<String> {
-    // 先嘗試 PATH 中的 code
-    if which_exists("code") {
-        return Some("code".to_string());
-    }
-
-    // Windows fallback 路徑
+    // Windows: use `where` to get the full path (handles .cmd extension)
     #[cfg(target_os = "windows")]
     {
+        if let Ok(output) = Command::new("where").arg("code").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // `where` may return multiple lines; prefer .cmd
+                for line in stdout.lines() {
+                    let path = line.trim();
+                    if path.ends_with(".cmd") {
+                        return Some(path.to_string());
+                    }
+                }
+                // Fallback to first result
+                if let Some(first) = stdout.lines().next() {
+                    let path = first.trim();
+                    if !path.is_empty() {
+                        return Some(path.to_string());
+                    }
+                }
+            }
+        }
+
+        // Fallback: check common install locations
         let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
         let paths = [
-            format!("{}/Programs/Microsoft VS Code/bin/code.cmd", local_app_data),
-            format!("{}/Programs/Microsoft VS Code/Code.exe", local_app_data),
+            format!("{}\\Programs\\Microsoft VS Code\\bin\\code.cmd", local_app_data),
+            format!("{}\\Programs\\Microsoft VS Code\\Code.exe", local_app_data),
         ];
         for path in &paths {
             if std::path::Path::new(path).exists() {
                 return Some(path.clone());
             }
+        }
+    }
+
+    // Unix: use `which`
+    #[cfg(not(target_os = "windows"))]
+    {
+        if which_exists("code") {
+            return Some("code".to_string());
         }
     }
 
