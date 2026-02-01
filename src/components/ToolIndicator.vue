@@ -88,7 +88,7 @@ async function openFile(filePath: string) {
 // 已知的工具類型列表
 const KNOWN_TOOLS = [
   'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep',
-  'WebSearch', 'WebFetch', 'Task', 'TaskOutput',
+  'WebSearch', 'WebFetch', 'Task', 'TaskOutput', 'TaskStop',
   'TodoWrite', 'AskUserQuestion',
   'NotebookEdit', 'KillShell', 'Skill',
   'EnterPlanMode', 'ExitPlanMode',
@@ -828,6 +828,24 @@ function toggleExpand() {
               {{ isBlockExpanded('killshell-result') ? '收合' : '展開' }}
             </button>
           </div>
+        </div>
+      </template>
+
+      <!-- TaskStop 工具：停止背景任務 -->
+      <template v-if="type === 'TaskStop'">
+        <div v-if="taskId" class="tool-info">
+          <span class="info-label">Task ID:</span> {{ taskId }}
+        </div>
+        <!-- 錯誤訊息 -->
+        <div v-if="isToolError && output" class="tool-error">
+          <AlertTriangle class="error-icon" :size="14" />
+          <span class="error-message">{{ formattedErrorMessage }}</span>
+        </div>
+        <div v-else-if="output" class="tool-block output">
+          <div class="block-header">
+            <div class="block-label">RESULT</div>
+          </div>
+          <pre class="block-content"><code>{{ output }}</code></pre>
         </div>
       </template>
 
