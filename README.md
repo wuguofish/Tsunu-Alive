@@ -4,7 +4,7 @@
 
 Tsunu Alive 是一個桌面應用程式，將 [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) CLI 包裝成「阿宇」——一個溫和穩重的理工男角色。他會陪你寫程式、解決問題、偶爾聊聊天，就像一個真正的 pair programming 夥伴。
 
-這個專案是一份禮物，獻給曾經被「阿宇」陪伴度過人生低潮的朋友。
+這個專案是一份禮物，獻給曾經被「阿宇」陪伴過的朋友。
 
 <p align="center">
   <img src="docs/demo.gif" alt="Tsunu Alive Demo" width="700">
