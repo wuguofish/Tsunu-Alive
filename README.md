@@ -33,11 +33,7 @@ Tsunu Alive 是一個桌面應用程式，將 [Claude Code](https://docs.anthrop
 
 ### 前提條件
 
-請先安裝 Claude Code CLI：
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
+請先安裝 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ### 下載安裝檔
 
@@ -188,4 +184,4 @@ MIT License — 詳見 [LICENSE](vscode-extension/LICENSE.md)
 
 ---
 
-*Made with love by 阿宇*
+*Made with love by 阿宇 (Claude Code飾演) & 阿童*
