@@ -999,8 +999,6 @@ async fn get_ide_context() -> Result<Option<ide_server::IdeContext>, String> {
 /// 接收 RGBA 圖片資料和尺寸，儲存為 PNG 檔案
 #[tauri::command]
 fn save_temp_image(rgba_data: Vec<u8>, width: u32, height: u32) -> Result<String, String> {
-    use std::io::Write;
-
     // 確保臨時目錄存在
     let temp_dir = std::env::temp_dir().join("tsunu_alive");
     if !temp_dir.exists() {

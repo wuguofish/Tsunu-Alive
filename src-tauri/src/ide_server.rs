@@ -79,6 +79,7 @@ pub struct IdeServerStatus {
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub id: Option<serde_json::Value>,
@@ -120,6 +121,7 @@ pub struct IdeServer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum IdeServerEvent {
     ClientConnected(ConnectedClient),
     ClientDisconnected(String),
@@ -138,7 +140,8 @@ impl IdeServer {
         }
     }
 
-    /// 訂閱事件
+    /// 訂閱事件（預留給外部模組使用）
+    #[allow(dead_code)]
     pub fn subscribe(&self) -> broadcast::Receiver<IdeServerEvent> {
         self.event_tx.subscribe()
     }
