@@ -376,7 +376,7 @@ avatarState 更新
 
 - [ ] **MCP 伺服器支援** - 連接外部工具、資料庫、API
 - [ ] **Hooks 設定 UI** - 設定自動化鉤子（如：編輯後自動執行測試）
-- [ ] **Memory 設定** - 設定 Claude 的記憶
+- [x] **Memory 設定** - 設定 Claude 的記憶
 - [ ] **Git 整合**
   - 提交變更（commit）
   - 建立 PR
@@ -384,7 +384,7 @@ avatarState 更新
 
 ### Phase 6：打包與發布
 
-- [ ] 打包 macOS 版本
+- [x] 打包 macOS 版本
 - [ ] 測試（請收禮者協助）
 - [ ] 修正問題並完成
 
