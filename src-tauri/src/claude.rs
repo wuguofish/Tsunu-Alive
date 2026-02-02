@@ -753,12 +753,10 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
             // 從 usage 中取得 token 數量
             let usage = json.get("usage");
             let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_creation = usage.and_then(|u| u.get("cache_creation_input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_read = usage.and_then(|u| u.get("cache_read_input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
             let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
 
-            // 計算總 token 數（這是對話中實際使用的 context）
-            let total_tokens = input_tokens + cache_creation + cache_read + output_tokens;
+            // 計算總 token 數（input_tokens 已包含 cache_read，不需重複加 cache 欄位）
+            let total_tokens = input_tokens + output_tokens;
 
             // 從 modelUsage 中取得 context window 大小
             let model_usage = json.get("modelUsage").and_then(|m| m.as_object());
