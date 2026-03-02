@@ -581,7 +581,10 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 }
 
                 if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
-                    let is_complete = message.get("stop_reason").is_some();
+                    // stop_reason 為 null 時代表訊息還在串流中，只有非 null 值才表示完成
+                    let is_complete = message.get("stop_reason")
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
 
                     for block in content {
                         if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
@@ -867,7 +870,46 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 context_window_used_percent,
             });
         }
-        _ => {}
+        "progress" => {
+            // Bash 長時間執行中的進度回報
+            if let Some(data) = json.get("data") {
+                let data_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let parent_tool_id = json.get("parentToolUseID").and_then(|t| t.as_str()).unwrap_or("");
+
+                match data_type {
+                    "bash_progress" => {
+                        let elapsed = data.get("elapsedTimeSeconds").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let output = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                        if !parent_tool_id.is_empty() && (elapsed % 10 == 0 || !output.is_empty()) {
+                            // 將進度回報轉為 ToolResult 事件更新（覆蓋同一工具的結果）
+                            let progress_text = if output.is_empty() {
+                                format!("⏳ 執行中... ({}s)", elapsed)
+                            } else {
+                                format!("⏳ 執行中... ({}s)\n{}", elapsed, output)
+                            };
+                            events.push(ClaudeEvent::ToolResult {
+                                tool_id: parent_tool_id.to_string(),
+                                result: progress_text,
+                                is_error: false,
+                                structured_patch: None,
+                                image_base64: None,
+                            });
+                        }
+                    }
+                    "agent_progress" => {
+                        // Sub-agent 進度：暫時只記錄 log
+                        eprintln!("🤖 Sub-agent progress for tool {}", parent_tool_id);
+                    }
+                    _ => {
+                        eprintln!("📡 Unknown progress type: {}", data_type);
+                    }
+                }
+            }
+        }
+        other => {
+            // 記錄未處理的事件類型（debug 用）
+            eprintln!("⚠️ Unhandled event type: {}", other);
+        }
     }
 
     events

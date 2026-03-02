@@ -586,6 +586,7 @@ export function handleConnectedEvent(
 
 /**
  * 處理 Compacted 事件（對話摘要壓縮完成）
+ * 注意：auto-compact 發生在 Claude 持續工作中，不代表對話結束
  */
 export function handleCompactedEvent(
   event: ClaudeEvent,
@@ -603,13 +604,12 @@ export function handleCompactedEvent(
   return {
     stateUpdates: {
       messages,
-      busyStatus: '',
-      avatarState: 'complete' as AvatarState,
+      // 重置 streamingText，避免 compact 前後的文字混在一起
+      streamingText: '',
+      // 不改變 isLoading 和 avatarState：Claude 在 compact 後會繼續工作
     },
     actions: [
       { type: 'scrollToBottom' },
-      { type: 'stopBusyTextAnimation' },
-      { type: 'startCompleteTimer' },
     ],
   };
 }
