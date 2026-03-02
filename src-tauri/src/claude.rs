@@ -296,6 +296,7 @@ pub async fn start_claude(
 
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
+        let mut parser = ClaudeEventParser::new();
 
         while let Ok(Some(line)) = reader.next_line().await {
             if line.trim().is_empty() {
@@ -304,7 +305,7 @@ pub async fn start_claude(
 
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(json) => {
-                    let events = parse_claude_output(&json);
+                    let events = parser.parse(&json);
                     for evt in events {
                         // 如果是 Init 事件，儲存 session_id
                         if let ClaudeEvent::Init { ref session_id, .. } = evt {
@@ -420,6 +421,7 @@ pub async fn run_claude(
     }
 
     let mut reader = BufReader::new(stdout).lines();
+    let mut parser = ClaudeEventParser::new();
 
     // 逐行讀取 JSON 輸出
     while let Ok(Some(line)) = reader.next_line().await {
@@ -429,7 +431,7 @@ pub async fn run_claude(
 
         match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(json) => {
-                let events = parse_claude_output(&json);
+                let events = parser.parse(&json);
                 for evt in events {
                     // 如果是 Init 事件，儲存 session_id
                     if let ClaudeEvent::Init { ref session_id, .. } = evt {
@@ -482,8 +484,33 @@ pub async fn get_session_id(process: Arc<Mutex<ClaudeProcess>>) -> Option<String
     proc.session_id.clone()
 }
 
-/// 解析 Claude CLI 輸出並轉換為事件
+/// Claude CLI 事件解析器（有狀態，追蹤每個 turn 的 token 用量）
+struct ClaudeEventParser {
+    /// 最近一次 assistant turn 的 input_tokens（代表當前 context window 使用量）
+    last_turn_input_tokens: u64,
+    /// 最近一次 assistant turn 的 output_tokens
+    last_turn_output_tokens: u64,
+}
+
+impl ClaudeEventParser {
+    fn new() -> Self {
+        Self {
+            last_turn_input_tokens: 0,
+            last_turn_output_tokens: 0,
+        }
+    }
+}
+
+/// 解析 Claude CLI 輸出並轉換為事件（向下相容的包裝函式，用於測試）
+#[cfg(test)]
 fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
+    let mut parser = ClaudeEventParser::new();
+    parser.parse(json)
+}
+
+impl ClaudeEventParser {
+/// 解析 Claude CLI 輸出並轉換為事件
+fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
     let mut events = Vec::new();
 
     let msg_type = match json.get("type").and_then(|t| t.as_str()) {
@@ -541,6 +568,18 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
         }
         "assistant" => {
             if let Some(message) = json.get("message") {
+                // 追蹤每個 turn 的 token 用量
+                // assistant 事件的 message.usage 包含該次 turn 的 input/output tokens
+                // input_tokens 代表送入的完整 context 大小，是 context window 使用量的最佳近似值
+                if let Some(usage) = message.get("usage") {
+                    if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                        self.last_turn_input_tokens = input;
+                    }
+                    if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                        self.last_turn_output_tokens = output;
+                    }
+                }
+
                 if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
                     let is_complete = message.get("stop_reason").is_some();
 
@@ -748,15 +787,9 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 .unwrap_or(0.0);
 
             // 計算 context window 使用量
-            // Claude CLI stream-json 格式不直接提供 context_window_used_percent，需要自己計算
-
-            // 從 usage 中取得 token 數量
-            let usage = json.get("usage");
-            let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-
-            // 計算總 token 數（input_tokens 已包含 cache_read，不需重複加 cache 欄位）
-            let total_tokens = input_tokens + output_tokens;
+            // result 事件的 usage.input_tokens 是所有 turn 的累積值，不能直接用來算百分比
+            // 改用最近一次 assistant turn 的 input_tokens + output_tokens 作為當前 context 使用量
+            // （每次 turn 都會送入完整對話 context，所以 input_tokens 就是 context 大小）
 
             // 從 modelUsage 中取得 context window 大小
             let model_usage = json.get("modelUsage").and_then(|m| m.as_object());
@@ -765,18 +798,30 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 m.values().next().and_then(|v| v.get("contextWindow")).and_then(|c| c.as_u64())
             });
 
-            // 計算使用百分比
+            // 用最近一次 turn 的 token 數計算 context window 使用量
+            let last_turn_tokens = self.last_turn_input_tokens + self.last_turn_output_tokens;
             let (total_tokens_in_conversation, context_window_used_percent) = if let Some(max) = context_window_max {
-                let percent = (total_tokens as f64 / max as f64) * 100.0;
-                (Some(total_tokens), Some(percent))
+                if last_turn_tokens > 0 {
+                    let percent = (last_turn_tokens as f64 / max as f64) * 100.0;
+                    (Some(last_turn_tokens), Some(percent))
+                } else {
+                    // 若沒有追蹤到 per-turn usage，用累積值作為 fallback
+                    let usage = json.get("usage");
+                    let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let total = input_tokens + output_tokens;
+                    let percent = (total as f64 / max as f64) * 100.0;
+                    (Some(total), Some(percent))
+                }
             } else {
-                (if total_tokens > 0 { Some(total_tokens) } else { None }, None)
+                (if last_turn_tokens > 0 { Some(last_turn_tokens) } else { None }, None)
             };
 
             // Debug: 印出 context 資訊
-            if total_tokens > 0 {
-                eprintln!("📊 Context usage: {} tokens / {:?} max = {:?}%",
-                    total_tokens, context_window_max, context_window_used_percent);
+            if last_turn_tokens > 0 {
+                eprintln!("📊 Context usage (last turn): {} tokens (in={}, out={}) / {:?} max = {:?}%",
+                    last_turn_tokens, self.last_turn_input_tokens, self.last_turn_output_tokens,
+                    context_window_max, context_window_used_percent);
             }
 
             // 檢查是否有權限被拒絕（支援蛇底式和駝峰式）
@@ -827,6 +872,7 @@ fn parse_claude_output(json: &serde_json::Value) -> Vec<ClaudeEvent> {
 
     events
 }
+} // impl ClaudeEventParser
 
 #[cfg(test)]
 mod tests {
@@ -1015,16 +1061,42 @@ mod tests {
 
     #[test]
     fn test_parse_complete_event_with_context_info() {
-        let json = json!({
+        // 模擬真實 CLI 流程：先收到 assistant 事件（帶 per-turn usage），再收到 result 事件
+        let mut parser = ClaudeEventParser::new();
+
+        // 1. 先解析 assistant 事件，讓 parser 追蹤 per-turn usage
+        let assistant_json = json!({
+            "type": "assistant",
+            "message": {
+                "content": [{ "type": "text", "text": "Hello" }],
+                "usage": {
+                    "input_tokens": 12000,
+                    "output_tokens": 3000
+                },
+                "stop_reason": "end_turn"
+            }
+        });
+        parser.parse(&assistant_json);
+
+        // 2. 解析 result 事件（modelUsage 包含 contextWindow）
+        let result_json = json!({
             "type": "result",
             "result": "Done",
             "total_cost_usd": 0.10,
-            "total_tokens_in_conversation": 15000,
-            "context_window_max": 200000,
-            "context_window_used_percent": 7.5
+            "usage": {
+                "input_tokens": 50000,
+                "output_tokens": 10000
+            },
+            "modelUsage": {
+                "claude-sonnet-4-6-20260101": {
+                    "inputTokens": 50000,
+                    "outputTokens": 10000,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 64000
+                }
+            }
         });
-
-        let events = parse_claude_output(&json);
+        let events = parser.parse(&result_json);
 
         let complete_events: Vec<_> = events.iter()
             .filter(|e| matches!(e, ClaudeEvent::Complete { .. }))
@@ -1036,8 +1108,10 @@ mod tests {
             ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent } => {
                 assert_eq!(result, "Done");
                 assert!((cost_usd - 0.10).abs() < 0.001);
+                // 應該用 per-turn usage (12000 + 3000 = 15000)，而非累積值 (50000 + 10000 = 60000)
                 assert_eq!(*total_tokens_in_conversation, Some(15000));
                 assert_eq!(*context_window_max, Some(200000));
+                // 15000 / 200000 = 7.5%
                 assert!((context_window_used_percent.unwrap() - 7.5).abs() < 0.001);
             }
             _ => panic!("Expected Complete event"),

@@ -141,7 +141,7 @@ tsunu_alive/
 
 - Node.js 20+
 - Rust（透過 [rustup](https://rustup.rs/) 安裝）
-- Claude Code CLI（`npm install -g @anthropic-ai/claude-code`）
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
 
 ### 開發指令
 
