@@ -399,9 +399,13 @@ pub async fn run_claude(
         }
     }
 
-    // 如果有 permissionMode，加入參數
-    if let Some(mode) = &permission_mode {
-        cmd.arg("--permission-mode").arg(mode);
+    // 權限模式處理：
+    // - plan 模式：直接傳給 CLI（限制 Claude 只能探索，不能修改）
+    // - 其他模式（default/acceptEdits/bypassPermissions）：一律用 CLI 預設的 default，
+    //   由 permission_server 根據 edit_mode 在 server 端自動允許對應工具。
+    //   這確保 ExitPlanMode 等關鍵工具一定會經過我們的 hook。
+    if permission_mode.as_deref() == Some("plan") {
+        cmd.arg("--permission-mode").arg("plan");
     }
 
     // 如果啟用 extended thinking

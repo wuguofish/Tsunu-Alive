@@ -42,6 +42,9 @@ const sessionAllowedTools = ref<Set<string>>(new Set());
 // 記住上一次的 prompt（用於權限確認後重新執行）
 const lastPrompt = ref<string>('');
 
+// 待送出的訊息（Claude 工作中時使用者輸入的下一則訊息）
+const pendingMessage = ref<string | null>(null);
+
 // 累積的回應文字
 const streamingText = ref('');
 
@@ -320,6 +323,16 @@ function cycleEditMode() {
   editMode.value = modes[(currentIndex + 1) % modes.length];
 }
 
+// editMode 變更時同步到後端 permission_server
+// 這樣 server 才能根據模式自動允許對應的工具
+watch(editMode, async (newMode) => {
+  try {
+    await invoke('set_edit_mode', { mode: newMode });
+  } catch (error) {
+    console.error('Failed to sync edit mode to backend:', error);
+  }
+}, { immediate: true });
+
 // Extended Thinking 模式
 const extendedThinking = ref(false);
 
@@ -592,7 +605,18 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
   if (stateUpdates.pendingPermission !== undefined) pendingPermission.value = stateUpdates.pendingPermission;
   if (stateUpdates.avatarState !== undefined) avatarState.value = stateUpdates.avatarState;
   if (stateUpdates.busyStatus !== undefined) busyStatus.value = stateUpdates.busyStatus;
-  if (stateUpdates.isLoading !== undefined) isLoading.value = stateUpdates.isLoading;
+  if (stateUpdates.isLoading !== undefined) {
+    isLoading.value = stateUpdates.isLoading;
+    // Claude 結束工作後，自動送出排隊中的訊息
+    if (!stateUpdates.isLoading && pendingMessage.value) {
+      const queued = pendingMessage.value;
+      pendingMessage.value = null;
+      nextTick(() => {
+        userInput.value = queued;
+        sendMessage();
+      });
+    }
+  }
   if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
   if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
   if (stateUpdates.availableSkills !== undefined) {
@@ -1224,9 +1248,9 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
     ...extraAllowedTools
   ];
 
-  // 根據編輯模式決定 permissionMode（變數名稱直接對應 Claude CLI）
-  // 'default' 模式不傳參數（Claude CLI 預設行為）
-  const permissionMode = editMode.value === 'default' ? null : editMode.value;
+  // 權限模式：只有 plan 模式需要傳給 CLI（限制 Claude 只能探索不能修改）
+  // 其他模式一律由 permission_server 根據 edit_mode 在 server 端處理
+  const permissionMode = editMode.value === 'plan' ? 'plan' : null;
 
   try {
     // 呼叫 Rust 端送出訊息給 Claude CLI
@@ -1287,7 +1311,14 @@ async function handleRememberCommand(content: string) {
 // 送出訊息（從輸入框）
 async function sendMessage() {
   const content = userInput.value.trim();
-  if (!content || isLoading.value) return;
+  if (!content) return;
+
+  // Claude 正在工作時，將訊息排隊等待
+  if (isLoading.value) {
+    pendingMessage.value = content;
+    userInput.value = '';
+    return;
+  }
 
   // /remember 指令攔截：直接儲存記憶，不送給 Claude
   if (content.startsWith('/remember ')) {
@@ -2462,6 +2493,15 @@ async function interruptRequest() {
   avatarState.value = 'idle';
   streamingText.value = '';
   currentToolUses.value = [];
+
+  // 中斷後如果有排隊的訊息，自動送出
+  if (pendingMessage.value) {
+    const queued = pendingMessage.value;
+    pendingMessage.value = null;
+    await nextTick();
+    userInput.value = queued;
+    sendMessage();
+  }
 }
 </script>
 
@@ -2657,10 +2697,15 @@ async function interruptRequest() {
           @keydown="handleKeydown"
           @input="handleInput"
           @paste="handlePaste"
-          placeholder="Type @ to mention files... (Ctrl+V 貼上圖片)"
-          :disabled="isLoading"
+          :placeholder="pendingMessage ? '⏳ 訊息已排隊，等待 Claude 完成...' : 'Type @ to mention files... (Ctrl+V 貼上圖片)'"
           rows="2"
         ></textarea>
+
+        <!-- 排隊中的訊息提示 -->
+        <div v-if="pendingMessage" class="pending-indicator">
+          <span class="pending-text">⏳ 排隊中：{{ pendingMessage.length > 30 ? pendingMessage.substring(0, 30) + '...' : pendingMessage }}</span>
+          <button class="pending-cancel" @click="pendingMessage = null" title="取消排隊">✕</button>
+        </div>
 
         <!-- @-Mention 選單 -->
         <div v-if="showMentionMenu && mentionFiles.length > 0" class="mention-menu">
@@ -2755,16 +2800,17 @@ async function interruptRequest() {
             <Slash class="slash-icon" :size="16" />
           </button>
           <button
-            v-if="!isLoading"
+            v-if="!isLoading || userInput.trim()"
             class="status-btn send-btn"
+            :class="{ 'queued': isLoading && userInput.trim() }"
             @click="sendMessage"
             :disabled="!userInput.trim()"
-            title="Send (Enter)"
+            :title="isLoading ? 'Queue message (Enter)' : 'Send (Enter)'"
           >
-            <span class="send-icon">⏎</span>
+            <span class="send-icon">{{ isLoading ? '⏳' : '⏎' }}</span>
           </button>
           <button
-            v-else
+            v-if="isLoading && !userInput.trim()"
             class="status-btn interrupt-btn"
             @click="interruptRequest"
             title="Interrupt (Esc)"
@@ -3425,6 +3471,46 @@ textarea::placeholder {
 
 textarea:disabled {
   opacity: 0.6;
+}
+
+/* 排隊中的訊息指示器 */
+.pending-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  color: var(--primary-color);
+  background: rgba(99, 102, 241, 0.08);
+  border-radius: 0 0 12px 12px;
+  margin-top: -4px;
+}
+
+.pending-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-cancel {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
+
+.pending-cancel:hover {
+  color: var(--text-color);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 排隊送出按鈕樣式 */
+.send-btn.queued {
+  opacity: 0.7;
 }
 
 /* 狀態列 */

@@ -67,6 +67,9 @@ pub struct PermissionState {
     session_allowed_tools: HashMap<String, HashSet<String>>,
     /// Tauri AppHandle，用於發送事件到前端
     app_handle: Option<AppHandle>,
+    /// 目前前端的編輯模式（default / acceptEdits / bypassPermissions / plan）
+    /// 用於在 server 端根據模式自動允許對應的工具
+    edit_mode: String,
 }
 
 impl PermissionState {
@@ -75,6 +78,7 @@ impl PermissionState {
             pending: HashMap::new(),
             session_allowed_tools: HashMap::new(),
             app_handle: None,
+            edit_mode: "default".to_string(),
         }
     }
 
@@ -103,6 +107,31 @@ impl PermissionState {
     /// 清除指定 session 的白名單
     pub fn clear_session_whitelist(&mut self, session_id: &str) {
         self.session_allowed_tools.remove(session_id);
+    }
+
+    /// 設定編輯模式
+    pub fn set_edit_mode(&mut self, mode: &str) {
+        self.edit_mode = mode.to_string();
+    }
+
+    /// 根據目前的 edit_mode 判斷工具是否可以自動允許
+    ///
+    /// 規則：
+    /// - default：只有 AUTO_ALLOW_TOOLS 會自動通過（由外層處理）
+    /// - acceptEdits：額外允許 Edit, Write, NotebookEdit
+    /// - bypassPermissions：允許所有工具，但 ExitPlanMode 例外（必須讓使用者審核計畫）
+    /// - plan：由 CLI 的 --permission-mode plan 處理，這裡不會收到
+    pub fn should_auto_allow_by_mode(&self, tool_name: &str) -> bool {
+        match self.edit_mode.as_str() {
+            "acceptEdits" => {
+                matches!(tool_name, "Edit" | "Write" | "NotebookEdit")
+            }
+            "bypassPermissions" => {
+                // ExitPlanMode 無論如何都必須讓使用者看到計畫並確認
+                tool_name != "ExitPlanMode"
+            }
+            _ => false, // default 和 plan 模式不額外放行
+        }
     }
 }
 
@@ -172,6 +201,16 @@ async fn handle_permission_request(
 
     // 檢查是否在 session 白名單中
     if state_guard.is_tool_allowed(&req.session_id, &req.tool_name) {
+        return Ok(Json(PermissionResponse {
+            behavior: "allow".to_string(),
+            message: None,
+            updated_input: None,
+        }));
+    }
+
+    // 根據編輯模式自動允許對應的工具
+    if state_guard.should_auto_allow_by_mode(&req.tool_name) {
+        eprintln!("🔓 Auto-allowing by edit_mode '{}': {}", state_guard.edit_mode, req.tool_name);
         return Ok(Json(PermissionResponse {
             behavior: "allow".to_string(),
             message: None,
@@ -291,6 +330,23 @@ async fn handle_whitelist_add(
     Json(serde_json::json!({ "success": true }))
 }
 
+/// 設定編輯模式
+/// POST /permission/edit-mode
+#[derive(Debug, Deserialize)]
+pub struct EditModeRequest {
+    pub mode: String,
+}
+
+async fn handle_set_edit_mode(
+    State(state): State<SharedPermissionState>,
+    Json(req): Json<EditModeRequest>,
+) -> Json<serde_json::Value> {
+    let mut state_guard = state.lock().await;
+    eprintln!("🔧 Edit mode changed to: {}", req.mode);
+    state_guard.set_edit_mode(&req.mode);
+    Json(serde_json::json!({ "success": true }))
+}
+
 /// 健康檢查
 /// GET /health
 async fn health_check() -> &'static str {
@@ -303,6 +359,7 @@ pub fn create_router(state: SharedPermissionState) -> Router {
         .route("/permission/request", post(handle_permission_request))
         .route("/permission/respond", post(handle_permission_respond))
         .route("/permission/whitelist/add", post(handle_whitelist_add))
+        .route("/permission/edit-mode", post(handle_set_edit_mode))
         .route("/health", axum::routing::get(health_check))
         .with_state(state)
 }
@@ -438,5 +495,38 @@ mod tests {
         for tool in AUTO_ALLOW_TOOLS {
             assert!(seen.insert(*tool), "Duplicate tool found: {}", tool);
         }
+    }
+
+    // edit_mode 自動允許邏輯測試
+    #[test]
+    fn test_default_mode_does_not_auto_allow() {
+        let state = PermissionState::new();
+        assert!(!state.should_auto_allow_by_mode("Edit"));
+        assert!(!state.should_auto_allow_by_mode("Write"));
+        assert!(!state.should_auto_allow_by_mode("Bash"));
+    }
+
+    #[test]
+    fn test_accept_edits_mode_allows_edit_tools() {
+        let mut state = PermissionState::new();
+        state.set_edit_mode("acceptEdits");
+        assert!(state.should_auto_allow_by_mode("Edit"));
+        assert!(state.should_auto_allow_by_mode("Write"));
+        assert!(state.should_auto_allow_by_mode("NotebookEdit"));
+        // Bash 不在 acceptEdits 的範圍
+        assert!(!state.should_auto_allow_by_mode("Bash"));
+        assert!(!state.should_auto_allow_by_mode("ExitPlanMode"));
+    }
+
+    #[test]
+    fn test_bypass_mode_allows_all_except_exit_plan() {
+        let mut state = PermissionState::new();
+        state.set_edit_mode("bypassPermissions");
+        assert!(state.should_auto_allow_by_mode("Edit"));
+        assert!(state.should_auto_allow_by_mode("Write"));
+        assert!(state.should_auto_allow_by_mode("Bash"));
+        assert!(state.should_auto_allow_by_mode("NotebookEdit"));
+        // ExitPlanMode 無論什麼模式都必須讓使用者確認
+        assert!(!state.should_auto_allow_by_mode("ExitPlanMode"));
     }
 }

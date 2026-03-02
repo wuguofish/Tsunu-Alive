@@ -92,6 +92,7 @@ const KNOWN_TOOLS = [
   'TodoWrite', 'AskUserQuestion',
   'NotebookEdit', 'KillShell', 'Skill',
   'EnterPlanMode', 'ExitPlanMode',
+  'Agent', 'ToolSearch',
 ] as const;
 
 // TodoWrite 的待辦事項類型
@@ -570,7 +571,7 @@ function toggleExpand() {
       </template>
 
       <!-- Task 工具：顯示 prompt -->
-      <template v-if="type === 'Task'">
+      <template v-if="type === 'Task' || type === 'Agent'">
         <div v-if="prompt" class="tool-block">
           <div class="block-header">
             <div class="block-label">PROMPT</div>

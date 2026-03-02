@@ -1312,6 +1312,19 @@ async fn clear_session_whitelist(
     Ok(())
 }
 
+/// 設定編輯模式（前端呼叫）
+/// permission_server 會根據此模式自動允許對應的工具
+#[tauri::command]
+async fn set_edit_mode(
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<(), String> {
+    let mut perm_state = state.permission_state.lock().await;
+    perm_state.set_edit_mode(&mode);
+    eprintln!("🔧 Edit mode set to: {}", mode);
+    Ok(())
+}
+
 // ============================================================================
 // Hook Installation
 // ============================================================================
@@ -1575,6 +1588,7 @@ pub fn run() {
             respond_to_permission,
             add_to_session_whitelist,
             clear_session_whitelist,
+            set_edit_mode,
             save_temp_image,
             save_temp_image_png,
             cleanup_temp_image,
