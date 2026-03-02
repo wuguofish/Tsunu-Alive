@@ -1248,9 +1248,11 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
     ...extraAllowedTools
   ];
 
-  // 權限模式：只有 plan 模式需要傳給 CLI（限制 Claude 只能探索不能修改）
-  // 其他模式一律由 permission_server 根據 edit_mode 在 server 端處理
-  const permissionMode = editMode.value === 'plan' ? 'plan' : null;
+  // 權限模式直接傳給 CLI
+  // - default 不傳（CLI 預設行為，所有工具觸發 hook）
+  // - acceptEdits/bypassPermissions/plan 直接傳給 CLI
+  // permission_server 的 edit_mode 邏輯在 default/acceptEdits 模式下補充處理
+  const permissionMode = editMode.value === 'default' ? null : editMode.value;
 
   try {
     // 呼叫 Rust 端送出訊息給 Claude CLI

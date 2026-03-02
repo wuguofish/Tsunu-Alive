@@ -400,12 +400,14 @@ pub async fn run_claude(
     }
 
     // 權限模式處理：
-    // - plan 模式：直接傳給 CLI（限制 Claude 只能探索，不能修改）
-    // - 其他模式（default/acceptEdits/bypassPermissions）：一律用 CLI 預設的 default，
-    //   由 permission_server 根據 edit_mode 在 server 端自動允許對應工具。
-    //   這確保 ExitPlanMode 等關鍵工具一定會經過我們的 hook。
-    if permission_mode.as_deref() == Some("plan") {
-        cmd.arg("--permission-mode").arg("plan");
+    // - default：不傳參數（CLI 預設行為，所有工具都觸發 hook）
+    // - acceptEdits：傳給 CLI，Edit/Write 免 hook；其他工具仍觸發 hook，
+    //   由 permission_server 的 edit_mode 邏輯處理
+    // - bypassPermissions：傳給 CLI，CLI 完全跳過 hook（含目錄存取限制放寬）
+    //   ⚠️ ExitPlanMode 在此模式下會被自動通過，計畫內容仍可從 stream 看到
+    // - plan：傳給 CLI，限制 Claude 只能探索不能修改
+    if let Some(mode) = &permission_mode {
+        cmd.arg("--permission-mode").arg(mode);
     }
 
     // 如果啟用 extended thinking

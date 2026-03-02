@@ -3,6 +3,8 @@
  * 提取自 App.vue，用於測試和重用
  */
 
+import { isAutoAllowTool } from '../constants/autoAllowTools';
+
 // structuredPatch 的 hunk 類型（Edit 工具的差異資訊）
 export interface DiffHunk {
   oldStart: number;
@@ -253,25 +255,23 @@ export function handleToolUseEvent(
 }
 
 /**
- * 「元工具」- 這些工具本身就是與用戶互動或內部追蹤用，不應該需要權限確認
- * 如果 Claude CLI 對這些工具發出 PermissionDenied，我們應該自動跳過（不顯示對話框）
+ * 判斷工具是否應該自動跳過 PermissionDenied 對話框
  *
- * 注意：這與 AUTO_ALLOW_TOOLS（給 permission_server 用）不同！
- * - META_TOOLS：前端自動跳過，不顯示對話框
- * - AUTO_ALLOW_TOOLS：permission_server 自動回應 allow
+ * 包含兩類工具：
+ * 1. AUTO_ALLOW_TOOLS（與 permission_server 同步）- 只讀工具等
+ * 2. ExitPlanMode - 由專門的 plan-approval-request 事件處理
+ *
+ * 背景：Claude CLI 的 PermissionRequest hook 有 bug (#29212)，
+ * 即使工具被 auto-allow，有時仍會發出 PermissionDenied 事件到 stream。
+ * 這裡作為前端的安全網，避免誤觸對話框。
  */
-const META_TOOLS = [
-  'AskUserQuestion',  // 本身就是詢問用戶
-  'EnterPlanMode',    // 進入計畫模式
-  'ExitPlanMode',     // 退出計畫模式
-  'TodoWrite',        // 內部追蹤
-  'TodoRead',         // 內部追蹤
-  'Task',             // 子代理任務
-  'TaskOutput',       // 子代理任務輸出
-] as const;
-
 function isMetaTool(toolName: string): boolean {
-  return META_TOOLS.includes(toolName as typeof META_TOOLS[number]);
+  // AUTO_ALLOW_TOOLS 包含：AskUserQuestion, Read, Glob, Grep,
+  // TodoRead, TodoWrite, Task, TaskOutput, WebSearch, WebFetch, EnterPlanMode
+  if (isAutoAllowTool(toolName)) return true;
+  // ExitPlanMode 走專用的 plan-approval 流程，不在這裡彈對話框
+  if (toolName === 'ExitPlanMode') return true;
+  return false;
 }
 
 /**
