@@ -7,6 +7,14 @@ interface AddonStatus {
   vscode_installed: boolean;
   claude_available: boolean;
   skill_installed: boolean;
+  jetbrains_available: boolean;
+  jetbrains_installed: boolean;
+  jetbrains_ides: Array<{
+    name: string;
+    config_path: string;
+    plugins_path: string;
+    plugin_installed: boolean;
+  }>;
 }
 
 const emit = defineEmits<{
@@ -21,6 +29,7 @@ const installResults = ref<Record<string, { success: boolean; message: string }>
 // 勾選狀態
 const installVscode = ref(true);
 const installSkill = ref(true);
+const installJetbrains = ref(true);
 
 onMounted(async () => {
   try {
@@ -41,6 +50,18 @@ async function handleInstall() {
       label: 'VS Code Extension',
       fn: () => invoke<string>('install_vscode_extension'),
     });
+  }
+
+  // Install JetBrains Plugin for each detected (uninstalled) IDE
+  if (installJetbrains.value && status.value?.jetbrains_available) {
+    const uninstalledIdes = status.value.jetbrains_ides.filter(ide => !ide.plugin_installed);
+    for (const ide of uninstalledIdes) {
+      tasks.push({
+        key: `jetbrains-${ide.name}`,
+        label: `JetBrains Plugin (${ide.name})`,
+        fn: () => invoke<string>('install_jetbrains_plugin', { pluginsPath: ide.plugins_path }),
+      });
+    }
   }
 
   if (installSkill.value && !status.value?.skill_installed) {
@@ -90,6 +111,7 @@ function handleDone() {
 function hasInstallableItems(): boolean {
   if (!status.value) return false;
   return (status.value.vscode_available && !status.value.vscode_installed) ||
+         (status.value.jetbrains_available && !status.value.jetbrains_installed) ||
          !status.value.skill_installed;
 }
 
@@ -136,6 +158,37 @@ function hasResults(): boolean {
           </div>
         </label>
 
+        <!-- JetBrains Plugin -->
+        <label v-if="status.jetbrains_ides.length > 0"
+               class="addon-item"
+               :class="{ disabled: status.jetbrains_installed }">
+          <input
+            type="checkbox"
+            v-model="installJetbrains"
+            :disabled="status.jetbrains_installed"
+          />
+          <div class="addon-info">
+            <div class="addon-name">
+              JetBrains Plugin
+              <span v-if="status.jetbrains_installed" class="badge installed">已安裝</span>
+            </div>
+            <div class="addon-desc">
+              讓阿宇能讀取你的 JetBrains IDE 編輯器內容
+              <div v-if="!status.jetbrains_installed" style="margin-top: 4px; font-size: 11px; color: var(--text-muted);">
+                偵測到：{{ status.jetbrains_ides.map(ide => ide.name).join('、') }}
+              </div>
+            </div>
+          </div>
+          <!-- Install results for each IDE -->
+          <template v-for="ide in status.jetbrains_ides" :key="ide.name">
+            <div v-if="installResults[`jetbrains-${ide.name}`]"
+                 class="install-result"
+                 :class="{ success: installResults[`jetbrains-${ide.name}`].success, error: !installResults[`jetbrains-${ide.name}`].success }">
+              {{ ide.name }}: {{ installResults[`jetbrains-${ide.name}`].success ? '安裝成功（需重啟 IDE）' : installResults[`jetbrains-${ide.name}`].message }}
+            </div>
+          </template>
+        </label>
+
         <!-- Claude Code Skill -->
         <label class="addon-item" :class="{ disabled: status.skill_installed }">
           <input
@@ -158,7 +211,7 @@ function hasResults(): boolean {
 
         <!-- 安裝中提示 -->
         <div v-if="installing" class="installing-status">
-          正在安裝 {{ installing === 'vscode' ? 'VS Code Extension' : 'Claude Code Skill' }}...
+          正在安裝 {{ installing === 'vscode' ? 'VS Code Extension' : installing === 'skill' ? 'Claude Code Skill' : installing.startsWith('jetbrains-') ? 'JetBrains Plugin' : installing }}...
         </div>
       </div>
 

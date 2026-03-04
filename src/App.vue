@@ -448,12 +448,22 @@ interface AddonStatus {
   vscode_installed: boolean;
   claude_available: boolean;
   skill_installed: boolean;
+  jetbrains_available: boolean;
+  jetbrains_installed: boolean;
+  jetbrains_ides: Array<{
+    name: string;
+    config_path: string;
+    plugins_path: string;
+    plugin_installed: boolean;
+  }>;
 }
 const addonStatus = ref<AddonStatus | null>(null);
 const hasUninstalledAddons = computed(() => {
   if (!addonStatus.value) return false;
   const s = addonStatus.value;
-  return (s.vscode_available && !s.vscode_installed) || !s.skill_installed;
+  return (s.vscode_available && !s.vscode_installed) ||
+         (s.jetbrains_available && !s.jetbrains_installed) ||
+         !s.skill_installed;
 });
 
 async function refreshAddonStatus() {
