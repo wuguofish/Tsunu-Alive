@@ -1,0 +1,58 @@
+<idea-plugin>
+    <id>com.tsunualive.connector</id>
+    <name>Tsunu Alive Connector</name>
+    <vendor>Tsunu Alive</vendor>
+    <description><![CDATA[
+    連接 JetBrains IDE 與 Tsunu Alive，分享編輯器 Context。
+    讓阿宇能讀取你的 IDE 編輯器內容，提供更好的 pair programming 體驗。
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationService
+            serviceImplementation="com.tsunualive.connector.settings.TsunuAliveSettings"/>
+
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.tsunualive.connector.settings.TsunuAliveSettingsConfigurable"
+            id="com.tsunualive.connector.settings"
+            displayName="Tsunu Alive"/>
+
+        <projectService
+            serviceImplementation="com.tsunualive.connector.service.TsunuAliveService"/>
+
+        <projectService
+            serviceImplementation="com.tsunualive.connector.listener.EditorContextTracker"/>
+
+        <statusBarWidgetFactory
+            id="TsunuAliveStatusBar"
+            implementation="com.tsunualive.connector.widget.TsunuAliveStatusBarWidgetFactory"
+            order="after encodingWidget"/>
+
+        <postStartupActivity
+            implementation="com.tsunualive.connector.startup.TsunuAliveStartupActivity"/>
+
+        <notificationGroup id="Tsunu Alive Notifications"
+                            displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <group id="TsunuAlive.ToolsMenu" text="Tsunu Alive" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="TsunuAlive.Connect"
+                    class="com.tsunualive.connector.action.ConnectAction"
+                    text="連接到 Tsunu Alive"
+                    description="連接或斷開 Tsunu Alive IDE Server"/>
+            <action id="TsunuAlive.SendContext"
+                    class="com.tsunualive.connector.action.SendContextAction"
+                    text="發送當前 Context"
+                    description="發送當前編輯器的 Context"/>
+            <action id="TsunuAlive.Launch"
+                    class="com.tsunualive.connector.action.LaunchAction"
+                    text="啟動阿宇"
+                    description="啟動 Tsunu Alive 應用程式"
+                    icon="/icons/tsunuAlive.svg"/>
+        </group>
+    </actions>
+</idea-plugin>
