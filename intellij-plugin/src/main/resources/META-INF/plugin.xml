@@ -38,6 +38,7 @@
     </extensions>
 
     <actions>
+        <!-- Tools 選單中的 Tsunu Alive 子選單 -->
         <group id="TsunuAlive.ToolsMenu" text="Tsunu Alive" popup="true">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
             <action id="TsunuAlive.Connect"
@@ -54,5 +55,15 @@
                     description="啟動 Tsunu Alive 應用程式"
                     icon="/icons/tsunuAlive.svg"/>
         </group>
+
+        <!-- 主工具列上的啟動阿宇按鈕 -->
+        <action id="TsunuAlive.LaunchToolbar"
+                class="com.tsunualive.connector.action.LaunchAction"
+                text="啟動阿宇"
+                description="啟動 Tsunu Alive 應用程式"
+                icon="/icons/tsunuAlive.svg">
+            <add-to-group group-id="MainToolbarRight" anchor="last"/>
+            <add-to-group group-id="NavBarToolBar" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>
