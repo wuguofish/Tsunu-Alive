@@ -1,5 +1,6 @@
 package com.tsunualive.connector.service
 
+import com.google.gson.JsonObject
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.components.Service
@@ -7,8 +8,10 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.tsunualive.connector.settings.TsunuAliveSettings
-import okhttp3.*
-import org.json.JSONObject
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.WebSocket
+import java.util.concurrent.CompletionStage
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -22,9 +25,7 @@ enum class ConnectionState {
 class TsunuAliveService(private val project: Project) : Disposable {
 
     private val log = Logger.getInstance(TsunuAliveService::class.java)
-    private val client = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = HttpClient.newHttpClient()
     private val messageId = AtomicInteger(0)
     private val wsRef = AtomicReference<WebSocket?>(null)
     private var reconnectFuture: ScheduledFuture<*>? = null
@@ -58,54 +59,70 @@ class TsunuAliveService(private val project: Project) : Disposable {
         connectionState = ConnectionState.CONNECTING
         notifyStateChanged()
 
-        val request = Request.Builder().url(url).build()
-        client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
+        val listener = object : WebSocket.Listener {
+            private val buffer = StringBuilder()
+
+            override fun onOpen(webSocket: WebSocket) {
                 log.info("Connected to Tsunu Alive")
                 wsRef.set(webSocket)
                 connectionState = ConnectionState.CONNECTED
                 notifyStateChanged()
                 cancelReconnect()
                 sendHello()
+                webSocket.request(1)
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val msg = JSONObject(text)
-                    if (msg.optString("method") == "server/hello") {
-                        val params = msg.optJSONObject("params")
-                        log.info("Server: ${params?.optString("name")} v${params?.optString("version")}")
+            override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
+                buffer.append(data)
+                if (last) {
+                    val text = buffer.toString()
+                    buffer.setLength(0)
+                    try {
+                        val msg = com.google.gson.JsonParser.parseString(text).asJsonObject
+                        if (msg.has("method") && msg.get("method").asString == "server/hello") {
+                            val params = msg.getAsJsonObject("params")
+                            log.info("Server: ${params?.get("name")?.asString} v${params?.get("version")?.asString}")
+                        }
+                    } catch (e: Exception) {
+                        log.warn("Failed to parse message: $text", e)
                     }
-                } catch (e: Exception) {
-                    log.warn("Failed to parse message: $text", e)
                 }
+                webSocket.request(1)
+                return null
             }
 
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(1000, null)
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? {
                 log.info("Connection closed: $reason")
                 wsRef.set(null)
                 connectionState = ConnectionState.DISCONNECTED
                 notifyStateChanged()
                 scheduleReconnect()
+                return null
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                log.warn("Connection failed: ${t.message}")
+            override fun onError(webSocket: WebSocket, error: Throwable) {
+                log.warn("Connection failed: ${error.message}")
                 wsRef.set(null)
                 connectionState = ConnectionState.ERROR
                 notifyStateChanged()
                 scheduleReconnect()
             }
-        })
+        }
+
+        try {
+            httpClient.newWebSocketBuilder()
+                .buildAsync(URI.create(url), listener)
+        } catch (e: Exception) {
+            log.error("Failed to initiate WebSocket connection", e)
+            connectionState = ConnectionState.ERROR
+            notifyStateChanged()
+            scheduleReconnect()
+        }
     }
 
     fun disconnect() {
         cancelReconnect()
-        wsRef.getAndSet(null)?.close(1000, "User disconnect")
+        wsRef.getAndSet(null)?.sendClose(WebSocket.NORMAL_CLOSURE, "User disconnect")
         connectionState = ConnectionState.DISCONNECTED
         notifyStateChanged()
     }
@@ -124,11 +141,12 @@ class TsunuAliveService(private val project: Project) : Disposable {
         val ideVersion = appInfo.fullVersion
         val workspacePath = project.basePath
 
-        sendJsonRpc("client/hello", JSONObject().apply {
-            put("name", ideName)
-            put("version", ideVersion)
-            if (workspacePath != null) put("workspacePath", workspacePath)
-        }, withId = true)
+        val params = JsonObject().apply {
+            addProperty("name", ideName)
+            addProperty("version", ideVersion)
+            if (workspacePath != null) addProperty("workspacePath", workspacePath)
+        }
+        sendJsonRpc("client/hello", params, withId = true)
     }
 
     fun sendContextUpdate(
@@ -138,33 +156,33 @@ class TsunuAliveService(private val project: Project) : Disposable {
         fileContent: String?,
         languageId: String?
     ) {
-        val params = JSONObject().apply {
-            filePath?.let { put("filePath", it) }
-            selectedText?.let { put("selectedText", it) }
-            selection?.let { put("selection", it.toJson()) }
-            fileContent?.let { put("fileContent", it) }
-            languageId?.let { put("languageId", it) }
+        val params = JsonObject().apply {
+            filePath?.let { addProperty("filePath", it) }
+            selectedText?.let { addProperty("selectedText", it) }
+            selection?.let { add("selection", it.toJson()) }
+            fileContent?.let { addProperty("fileContent", it) }
+            languageId?.let { addProperty("languageId", it) }
         }
         sendJsonRpc("context/update", params, withId = true)
     }
 
     fun sendSelectionChanged(selectedText: String, selection: SelectionRange) {
-        val params = JSONObject().apply {
-            put("selectedText", selectedText)
-            put("selection", selection.toJson())
+        val params = JsonObject().apply {
+            addProperty("selectedText", selectedText)
+            add("selection", selection.toJson())
         }
         sendJsonRpc("selection/changed", params, withId = false)
     }
 
-    private fun sendJsonRpc(method: String, params: JSONObject, withId: Boolean) {
+    private fun sendJsonRpc(method: String, params: JsonObject, withId: Boolean) {
         val ws = wsRef.get() ?: return
-        val msg = JSONObject().apply {
-            put("jsonrpc", "2.0")
-            if (withId) put("id", messageId.incrementAndGet())
-            put("method", method)
-            put("params", params)
+        val msg = JsonObject().apply {
+            addProperty("jsonrpc", "2.0")
+            if (withId) addProperty("id", messageId.incrementAndGet())
+            addProperty("method", method)
+            add("params", params)
         }
-        ws.send(msg.toString())
+        ws.sendText(msg.toString(), true)
         log.debug("Sent: $method")
     }
 
@@ -190,7 +208,6 @@ class TsunuAliveService(private val project: Project) : Disposable {
 
     override fun dispose() {
         disconnect()
-        client.dispatcher.executorService.shutdown()
     }
 
     companion object {
@@ -205,10 +222,10 @@ data class SelectionRange(
     val endLine: Int,
     val endCharacter: Int
 ) {
-    fun toJson(): JSONObject = JSONObject().apply {
-        put("start_line", startLine)
-        put("start_character", startCharacter)
-        put("end_line", endLine)
-        put("end_character", endCharacter)
+    fun toJson(): JsonObject = JsonObject().apply {
+        addProperty("start_line", startLine)
+        addProperty("start_character", startCharacter)
+        addProperty("end_line", endLine)
+        addProperty("end_character", endCharacter)
     }
 }

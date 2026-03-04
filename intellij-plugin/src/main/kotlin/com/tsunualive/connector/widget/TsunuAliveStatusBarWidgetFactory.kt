@@ -7,8 +7,8 @@ import com.intellij.openapi.wm.StatusBarWidget
 import com.intellij.openapi.wm.StatusBarWidgetFactory
 import com.tsunualive.connector.service.ConnectionState
 import com.tsunualive.connector.service.TsunuAliveService
+import com.intellij.util.Consumer
 import java.awt.event.MouseEvent
-import java.util.function.Consumer
 
 class TsunuAliveStatusBarWidgetFactory : StatusBarWidgetFactory {
 
