@@ -62,6 +62,25 @@ jobs:
           npm install
           npx @vscode/vsce package --allow-missing-repository --out tsunu-alive-connector.vsix
 
+      # 設定 JDK 17（IntelliJ Plugin 編譯需要）
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+          cache-dependency-path: intellij-plugin/*.gradle*
+
+      # 打包 IntelliJ Plugin
+      - name: Build IntelliJ Plugin
+        working-directory: intellij-plugin
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew buildPlugin
+          echo "IntelliJ Plugin built:"
+          ls -la build/distributions/
+
       # 準備 bundled resources（同 build-release 腳本的步驟 3）
       - name: Prepare bundled resources
         shell: bash
@@ -70,8 +89,11 @@ jobs:
           rm -rf "$BUNDLED_DIR"
           mkdir -p "$BUNDLED_DIR"
 
-          # 複製 .vsix
+          # 複製 VS Code Extension (.vsix)
           cp vscode-extension/tsunu-alive-connector.vsix "$BUNDLED_DIR/"
+
+          # 複製 IntelliJ Plugin (.zip)
+          cp intellij-plugin/build/distributions/tsunu-alive-connector-*.zip "$BUNDLED_DIR/tsunu-alive-connector.zip"
 
           # 複製 Skill 檔案
           mkdir -p "$BUNDLED_DIR/skill"
@@ -91,6 +113,20 @@ jobs:
 
           echo "Bundled resources prepared:"
           find "$BUNDLED_DIR" -type f
+
+      # 從 tag 同步版本號到 tauri.conf.json
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs = require('fs');
+            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            conf.version = '$VERSION';
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+          "
+          echo "Version synced to: $VERSION"
 
       # 建置 Tauri App
       - name: Build Tauri App
@@ -116,7 +152,11 @@ jobs:
             - 首次開啟若顯示「無法打開」，在「系統偏好設定 > 安全性」中允許
 
             ### 首次啟動
-            應用程式會自動偵測環境，提供安裝 VS Code Extension 和 Claude Code Skill 的選項。
+            應用程式會自動偵測環境，提供安裝 VS Code Extension、JetBrains Plugin 和 Claude Code Skill 的選項。
+
+            ### 支援的 IDE
+            - VS Code / Cursor
+            - 全系列 JetBrains IDE（IntelliJ IDEA、PyCharm、WebStorm、GoLand 等）
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}

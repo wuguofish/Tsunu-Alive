@@ -132,41 +132,69 @@ function findTsunuAliveExecutable(): string | null {
     const config = vscode.workspace.getConfiguration('tsunuAlive');
     const configPath = config.get<string>('executablePath', '');
 
-    // 優先使用設定中的路徑
+    // 1. 優先使用設定中的路徑
     if (configPath && fs.existsSync(configPath)) {
         return configPath;
     }
 
-    // 自動尋找常見安裝位置
     const homeDir = process.env.USERPROFILE || process.env.HOME || '';
     const isWindows = process.platform === 'win32';
     const isMac = process.platform === 'darwin';
 
+    // 2. Windows: 查詢 Registry 取得安裝路徑（最可靠）
+    if (isWindows) {
+        const registryPath = findFromWindowsRegistry();
+        if (registryPath) return registryPath;
+    }
+
+    // 3. 嘗試常見路徑候選
     const candidates: string[] = [];
 
     if (isWindows) {
-        // Windows 安裝位置
+        const localAppData = process.env.LOCALAPPDATA || path.join(homeDir, 'AppData', 'Local');
+        const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+
+        // Tauri NSIS 安裝器的預設路徑（productName 帶空格）
         candidates.push(
-            path.join(homeDir, 'AppData', 'Local', 'tsunu-alive', 'tsunu_alive.exe'),
-            path.join(homeDir, '.local', 'bin', 'tsunu_alive.exe'),
+            path.join(localAppData, 'Tsunu Alive', 'Tsunu Alive.exe'),
+            path.join(localAppData, 'Tsunu Alive', 'tsunu_alive.exe'),
+            path.join(programFiles, 'Tsunu Alive', 'Tsunu Alive.exe'),
+            path.join(programFiles, 'Tsunu Alive', 'tsunu_alive.exe'),
+            // 不帶空格的變體
+            path.join(localAppData, 'tsunu-alive', 'tsunu_alive.exe'),
+            path.join(localAppData, 'tsunu-alive', 'Tsunu Alive.exe'),
         );
+
+        // 掃描安裝目錄下所有 exe（處理 _temp 等命名變體）
+        const installDirs = [
+            path.join(localAppData, 'Tsunu Alive'),
+            path.join(localAppData, 'tsunu-alive'),
+            path.join(programFiles, 'Tsunu Alive'),
+        ];
+        for (const dir of installDirs) {
+            const found = scanDirForExecutable(dir);
+            if (found) {
+                candidates.unshift(found); // 放到最前面
+            }
+        }
     } else if (isMac) {
-        // macOS 安裝位置
         candidates.push(
+            '/Applications/Tsunu Alive.app/Contents/MacOS/Tsunu Alive',
             '/Applications/Tsunu Alive.app/Contents/MacOS/tsunu_alive',
+            path.join(homeDir, 'Applications', 'Tsunu Alive.app', 'Contents', 'MacOS', 'Tsunu Alive'),
             path.join(homeDir, 'Applications', 'Tsunu Alive.app', 'Contents', 'MacOS', 'tsunu_alive'),
             path.join(homeDir, '.local', 'bin', 'tsunu_alive'),
             '/usr/local/bin/tsunu_alive',
         );
     } else {
-        // Linux
         candidates.push(
             path.join(homeDir, '.local', 'bin', 'tsunu_alive'),
             '/usr/local/bin/tsunu_alive',
+            '/usr/bin/tsunu_alive',
         );
     }
 
-    // 開發模式位置（跨平台）
+    // 4. 開發模式位置（跨平台）
     const devDebug = path.join(__dirname, '..', '..', 'src-tauri', 'target', 'debug',
         isWindows ? 'tsunu_alive_temp.exe' : 'tsunu_alive_temp');
     const devRelease = path.join(__dirname, '..', '..', 'src-tauri', 'target', 'release',
@@ -181,6 +209,60 @@ function findTsunuAliveExecutable(): string | null {
     }
 
     return null;
+}
+
+/**
+ * 從 Windows Registry 查詢 Tauri NSIS 安裝器註冊的安裝路徑
+ */
+function findFromWindowsRegistry(): string | null {
+    const { execSync } = require('child_process');
+    const regKeys = [
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Tsunu Alive',
+        'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Tsunu Alive',
+    ];
+
+    for (const regKey of regKeys) {
+        try {
+            const output = execSync(`reg query "${regKey}" /v InstallLocation`, {
+                encoding: 'utf-8',
+                stdio: ['pipe', 'pipe', 'pipe'],
+            });
+
+            // 解析 "InstallLocation    REG_SZ    "C:\path\to\app""
+            const match = output.match(/InstallLocation\s+REG_SZ\s+"?(.+?)"?\s*$/m);
+            if (match) {
+                const installDir = match[1].trim();
+                const found = scanDirForExecutable(installDir);
+                if (found) {
+                    console.log(`從 Registry 找到 Tsunu Alive: ${found}`);
+                    return found;
+                }
+            }
+        } catch {
+            // Registry key 不存在，繼續嘗試下一個
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 掃描目錄找到 Tsunu Alive 主程式 exe
+ */
+function scanDirForExecutable(dir: string): string | null {
+    try {
+        if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null;
+
+        const files = fs.readdirSync(dir);
+        const exe = files.find(f =>
+            f.toLowerCase().includes('tsunu') &&
+            f.endsWith('.exe') &&
+            f !== 'uninstall.exe'
+        );
+        return exe ? path.join(dir, exe) : null;
+    } catch {
+        return null;
+    }
 }
 
 // ============================================================================

@@ -498,9 +498,90 @@ fn humanize_ide_name(dir_name: &str) -> String {
     dir_name.to_string()
 }
 
+/// 在 JetBrains IDE 的 settings XML 中設定 executablePath
+fn configure_jetbrains_executable_path(config_path: &str) -> Result<(), String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to get current exe path: {}", e))?;
+    let exe_str = exe_path.to_string_lossy().to_string();
+
+    let options_dir = PathBuf::from(config_path).join("options");
+    fs::create_dir_all(&options_dir)
+        .map_err(|e| format!("Failed to create options dir: {}", e))?;
+
+    let settings_file = options_dir.join("TsunuAliveSettings.xml");
+
+    // IntelliJ PersistentStateComponent XML 格式
+    // 如果檔案已存在，嘗試更新 executablePath；否則建立新檔案
+    let xml_content = if settings_file.exists() {
+        let content = fs::read_to_string(&settings_file)
+            .map_err(|e| format!("Failed to read settings XML: {}", e))?;
+
+        if content.contains("name=\"executablePath\"") {
+            // 簡易字串替換（避免引入 regex crate）
+            if let Some(start) = content.find(r#"<option name="executablePath" value=""#) {
+                if let Some(end) = content[start..].find('"') {
+                    let after_first_quote = start + end + 1;
+                    if let Some(close_quote) = content[after_first_quote..].find('"') {
+                        let mut result = String::new();
+                        result.push_str(&content[..after_first_quote]);
+                        result.push_str(&escape_xml(&exe_str));
+                        result.push_str(&content[after_first_quote + close_quote..]);
+                        result
+                    } else {
+                        content
+                    }
+                } else {
+                    content
+                }
+            } else {
+                content
+            }
+        } else if content.contains("</component>") {
+            // 在 </component> 前插入 executablePath
+            content.replace(
+                "</component>",
+                &format!(
+                    "    <option name=\"executablePath\" value=\"{}\" />\n  </component>",
+                    escape_xml(&exe_str)
+                ),
+            )
+        } else {
+            // 檔案格式不對，直接覆寫
+            generate_settings_xml(&exe_str)
+        }
+    } else {
+        generate_settings_xml(&exe_str)
+    };
+
+    fs::write(&settings_file, &xml_content)
+        .map_err(|e| format!("Failed to write settings XML: {}", e))?;
+
+    Ok(())
+}
+
+fn generate_settings_xml(exe_path: &str) -> String {
+    format!(
+        r#"<application>
+  <component name="com.tsunualive.connector.settings.TsunuAliveSettings">
+    <option name="executablePath" value="{}" />
+  </component>
+</application>
+"#,
+        escape_xml(exe_path)
+    )
+}
+
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// 安裝 JetBrains Plugin（從 bundled resource 解壓到 plugins 目錄）
 #[tauri::command]
-pub fn install_jetbrains_plugin(app: tauri::AppHandle, plugins_path: String) -> Result<String, String> {
+pub fn install_jetbrains_plugin(app: tauri::AppHandle, plugins_path: String, config_path: String) -> Result<String, String> {
     let bundled_dir = get_bundled_dir(&app)?;
     let zip_path = bundled_dir.join("tsunu-alive-connector.zip");
 
@@ -541,6 +622,11 @@ pub fn install_jetbrains_plugin(app: tauri::AppHandle, plugins_path: String) -> 
             std::io::copy(&mut entry, &mut outfile)
                 .map_err(|e| format!("Failed to write file: {}", e))?;
         }
+    }
+
+    // 安裝成功後，自動設定執行檔路徑
+    if let Err(e) = configure_jetbrains_executable_path(&config_path) {
+        eprintln!("Warning: plugin installed but failed to configure executable path: {}", e);
     }
 
     Ok("JetBrains Plugin installed successfully. Please restart your IDE.".to_string())

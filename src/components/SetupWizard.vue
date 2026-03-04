@@ -59,7 +59,7 @@ async function handleInstall() {
       tasks.push({
         key: `jetbrains-${ide.name}`,
         label: `JetBrains Plugin (${ide.name})`,
-        fn: () => invoke<string>('install_jetbrains_plugin', { pluginsPath: ide.plugins_path }),
+        fn: () => invoke<string>('install_jetbrains_plugin', { pluginsPath: ide.plugins_path, configPath: ide.config_path }),
       });
     }
   }

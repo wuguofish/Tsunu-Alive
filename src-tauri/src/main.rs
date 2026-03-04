@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    tsunu_alive_temp_lib::run()
+    tsunu_alive_lib::run()
 }
