@@ -53,7 +53,7 @@
                     class="com.tsunualive.connector.action.LaunchAction"
                     text="啟動阿宇"
                     description="啟動 Tsunu Alive 應用程式"
-                    icon="/icons/tsunuAlive.svg"/>
+                    icon="/icons/tsunuAlive.png"/>
         </group>
 
         <!-- 主工具列上的啟動阿宇按鈕 -->
@@ -61,7 +61,7 @@
                 class="com.tsunualive.connector.action.LaunchAction"
                 text="啟動阿宇"
                 description="啟動 Tsunu Alive 應用程式"
-                icon="/icons/tsunuAlive.svg">
+                icon="/icons/tsunuAlive.png">
             <add-to-group group-id="MainToolbarRight" anchor="last"/>
             <add-to-group group-id="NavBarToolBar" anchor="last"/>
         </action>
