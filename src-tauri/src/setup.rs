@@ -22,6 +22,21 @@ pub struct AddonStatus {
     pub claude_available: bool,
     /// Claude Code Skill 是否已安裝
     pub skill_installed: bool,
+    /// JetBrains IDE 是否可用
+    pub jetbrains_available: bool,
+    /// JetBrains Plugin 是否已安裝（任一 IDE）
+    pub jetbrains_installed: bool,
+    /// 偵測到的 JetBrains IDE 列表
+    pub jetbrains_ides: Vec<JetBrainsIdeInfo>,
+}
+
+/// JetBrains IDE 資訊
+#[derive(Debug, Clone, Serialize)]
+pub struct JetBrainsIdeInfo {
+    pub name: String,
+    pub config_path: String,
+    pub plugins_path: String,
+    pub plugin_installed: bool,
 }
 
 /// 取得使用者 home 目錄
@@ -162,11 +177,18 @@ pub fn check_addon_status() -> AddonStatus {
     let claude_available = which_exists("claude");
     let skill_installed = check_skill_installed();
 
+    let jetbrains_ides = find_jetbrains_ides();
+    let jetbrains_available = !jetbrains_ides.is_empty();
+    let jetbrains_installed = jetbrains_ides.iter().any(|ide| ide.plugin_installed);
+
     AddonStatus {
         vscode_available,
         vscode_installed,
         claude_available,
         skill_installed,
+        jetbrains_available,
+        jetbrains_installed,
+        jetbrains_ides,
     }
 }
 
@@ -381,6 +403,147 @@ fn copy_dir_recursive(src: &PathBuf, dest: &PathBuf) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ========================
+// JetBrains IDE Detection
+// ========================
+
+fn find_jetbrains_ides() -> Vec<JetBrainsIdeInfo> {
+    let mut ides = Vec::new();
+    let config_roots = get_jetbrains_config_roots();
+
+    for root in config_roots {
+        if !root.exists() { continue; }
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if is_jetbrains_ide_dir(&name) && entry.path().is_dir() {
+                    let config_path = entry.path();
+                    let plugins_path = config_path.join("plugins");
+                    let plugin_installed = plugins_path
+                        .join("tsunu-alive-connector")
+                        .join("lib")
+                        .exists();
+                    ides.push(JetBrainsIdeInfo {
+                        name: humanize_ide_name(&name),
+                        config_path: config_path.to_string_lossy().to_string(),
+                        plugins_path: plugins_path.to_string_lossy().to_string(),
+                        plugin_installed,
+                    });
+                }
+            }
+        }
+    }
+    ides
+}
+
+fn get_jetbrains_config_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            roots.push(PathBuf::from(appdata).join("JetBrains"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home_dir() {
+            roots.push(home.join("Library").join("Application Support").join("JetBrains"));
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(home) = home_dir() {
+            roots.push(home.join(".config").join("JetBrains"));
+        }
+    }
+    roots
+}
+
+fn is_jetbrains_ide_dir(name: &str) -> bool {
+    let prefixes = [
+        "PyCharm", "PyCharmCE",
+        "IntelliJIdea", "IdeaIC",
+        "AndroidStudio", "AndroidStudioPreview",
+        "WebStorm", "GoLand", "CLion", "RubyMine", "Rider",
+        "PhpStorm", "DataGrip", "RustRover",
+    ];
+    prefixes.iter().any(|p| name.starts_with(p))
+}
+
+fn humanize_ide_name(dir_name: &str) -> String {
+    let mappings = [
+        ("PyCharmCE", "PyCharm Community"),
+        ("PyCharm", "PyCharm Professional"),
+        ("IntelliJIdea", "IntelliJ IDEA Ultimate"),
+        ("IdeaIC", "IntelliJ IDEA Community"),
+        ("AndroidStudioPreview", "Android Studio Preview"),
+        ("AndroidStudio", "Android Studio"),
+        ("WebStorm", "WebStorm"),
+        ("GoLand", "GoLand"),
+        ("CLion", "CLion"),
+        ("RubyMine", "RubyMine"),
+        ("Rider", "Rider"),
+        ("PhpStorm", "PhpStorm"),
+        ("DataGrip", "DataGrip"),
+        ("RustRover", "RustRover"),
+    ];
+    for (prefix, display_name) in &mappings {
+        if dir_name.starts_with(prefix) {
+            let version = &dir_name[prefix.len()..];
+            return format!("{} {}", display_name, version);
+        }
+    }
+    dir_name.to_string()
+}
+
+/// 安裝 JetBrains Plugin（從 bundled resource 解壓到 plugins 目錄）
+#[tauri::command]
+pub fn install_jetbrains_plugin(app: tauri::AppHandle, plugins_path: String) -> Result<String, String> {
+    let bundled_dir = get_bundled_dir(&app)?;
+    let zip_path = bundled_dir.join("tsunu-alive-connector.zip");
+
+    if !zip_path.exists() {
+        return Err(format!("Plugin zip not found: {:?}", zip_path));
+    }
+
+    let dest = PathBuf::from(&plugins_path).join("tsunu-alive-connector");
+
+    // Remove old version if exists
+    if dest.exists() {
+        fs::remove_dir_all(&dest)
+            .map_err(|e| format!("Failed to remove old plugin: {}", e))?;
+    }
+
+    // Extract zip
+    let file = fs::File::open(&zip_path)
+        .map_err(|e| format!("Failed to open zip: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read zip: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)
+            .map_err(|e| format!("Failed to read zip entry: {}", e))?;
+
+        let out_path = PathBuf::from(&plugins_path).join(entry.mangled_name());
+
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path)
+                .map_err(|e| format!("Failed to create dir: {}", e))?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+            }
+            let mut outfile = fs::File::create(&out_path)
+                .map_err(|e| format!("Failed to create file: {}", e))?;
+            std::io::copy(&mut entry, &mut outfile)
+                .map_err(|e| format!("Failed to write file: {}", e))?;
+        }
+    }
+
+    Ok("JetBrains Plugin installed successfully. Please restart your IDE.".to_string())
 }
 
 /// 檢查是否首次啟動（setup 是否已完成）

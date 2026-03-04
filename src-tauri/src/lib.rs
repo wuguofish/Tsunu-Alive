@@ -1598,6 +1598,7 @@ pub fn run() {
             setup::check_addon_status,
             setup::install_vscode_extension,
             setup::install_skill,
+            setup::install_jetbrains_plugin,
             setup::check_setup_done,
             setup::mark_setup_done
         ])
