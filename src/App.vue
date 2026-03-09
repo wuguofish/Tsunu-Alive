@@ -425,7 +425,12 @@ const contextUsage = ref<number | null>(null);
 const contextInfo = ref<{
   totalTokens?: number;
   maxTokens?: number;
+  inputTokensThisTurn?: number;
+  inputTokensDelta?: number;
 } | null>(null);
+
+// 上一次 turn 的 input tokens（用於計算增量）
+const prevInputTokens = ref<number | null>(null);
 
 // Context 用量圖示（根據用量百分比顯示不同的圓圈）
 const contextUsageIcon = computed(() => {
@@ -596,6 +601,7 @@ function getCurrentAppState(): AppState {
     editMode: editMode.value,
     contextUsage: contextUsage.value,
     contextInfo: contextInfo.value,
+    prevInputTokens: prevInputTokens.value,
     lastPrompt: lastPrompt.value,
     availableSkills: availableSkills.value,
   };
@@ -629,6 +635,7 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
   }
   if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
   if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
+  if (stateUpdates.prevInputTokens !== undefined) prevInputTokens.value = stateUpdates.prevInputTokens;
   if (stateUpdates.availableSkills !== undefined) {
     availableSkills.value = stateUpdates.availableSkills;
     // 重新載入 skills（合併 init 事件的 skills 和自訂 skills）
@@ -2788,10 +2795,13 @@ async function interruptRequest() {
           </button>
           <button class="status-btn context-usage" v-if="contextUsage"
             :class="{ warning: contextUsage !== null && contextUsage >= 80, danger: contextUsage !== null && contextUsage >= 95 }"
-            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}\n點擊執行 /compact` : '點擊執行 /compact'"
+            :title="contextInfo ? `Tokens: ${contextInfo.totalTokens?.toLocaleString() || '?'} / ${contextInfo.maxTokens?.toLocaleString() || '?'}${contextInfo.inputTokensThisTurn ? `\nInput: ${contextInfo.inputTokensThisTurn.toLocaleString()} tokens` : ''}${contextInfo.inputTokensDelta !== undefined ? ` (${contextInfo.inputTokensDelta >= 0 ? '+' : ''}${contextInfo.inputTokensDelta.toLocaleString()})` : ''}\n點擊執行 /compact` : '點擊執行 /compact'"
             @click="executeSlashCommand('/compact')">
             <span class="usage-icon">{{ contextUsageIcon }}</span>
             <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
+            <span v-if="contextInfo?.inputTokensDelta !== undefined" class="usage-delta"
+              :class="{ 'delta-warning': (contextInfo?.inputTokensDelta ?? 0) > 5000 }"
+            >({{ contextInfo.inputTokensDelta >= 0 ? '+' : '' }}{{ Math.round((contextInfo.inputTokensDelta ?? 0) / 1000) }}k)</span>
           </button>
         </div>
 
@@ -3611,6 +3621,19 @@ textarea:disabled {
 @keyframes pulse-danger {
   0%, 100% { opacity: 0.5; transform: scale(1); }
   50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* Input token 增量指示 */
+.usage-delta {
+  font-size: 0.7rem;
+  opacity: 0.7;
+  margin-left: 2px;
+}
+
+.usage-delta.delta-warning {
+  color: #e67e22;
+  opacity: 1;
+  font-weight: 600;
 }
 
 /* IDE 連接狀態 */
