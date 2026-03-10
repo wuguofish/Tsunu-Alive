@@ -623,15 +623,8 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
   if (stateUpdates.busyStatus !== undefined) busyStatus.value = stateUpdates.busyStatus;
   if (stateUpdates.isLoading !== undefined) {
     isLoading.value = stateUpdates.isLoading;
-    // Claude 結束工作後，自動送出排隊中的訊息
-    if (!stateUpdates.isLoading && pendingMessage.value) {
-      const queued = pendingMessage.value;
-      pendingMessage.value = null;
-      nextTick(() => {
-        userInput.value = queued;
-        sendMessage();
-      });
-    }
+    // 注意：排隊訊息的自動送出已移到 sendMessageCore 的 invoke 完成後，
+    // 避免在第一個 CLI 程序尚未結束時就啟動第二個，造成 mutex 競爭
   }
   if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
   if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
@@ -1292,6 +1285,18 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
       role: 'assistant',
       items: [{ type: 'text', content: `*皺眉* 連接 Claude 時發生錯誤：${error}` }]
     });
+  }
+
+  // CLI 程序已完全結束（invoke resolved），安全地送出排隊中的訊息
+  // 重要：必須在 invoke 完成後才送出，否則兩個 run_claude 會同時執行，
+  // 第二個 CLI 的 Init 事件需要取得 process mutex lock，
+  // 而第一個 run_claude 正持有 lock 等待 child exit → 造成 mutex 競爭
+  if (pendingMessage.value) {
+    const queued = pendingMessage.value;
+    pendingMessage.value = null;
+    await nextTick();
+    userInput.value = queued;
+    await sendMessage();
   }
 }
 
@@ -2513,14 +2518,8 @@ async function interruptRequest() {
   streamingText.value = '';
   currentToolUses.value = [];
 
-  // 中斷後如果有排隊的訊息，自動送出
-  if (pendingMessage.value) {
-    const queued = pendingMessage.value;
-    pendingMessage.value = null;
-    await nextTick();
-    userInput.value = queued;
-    sendMessage();
-  }
+  // 注意：排隊訊息的自動送出由 sendMessageCore 的 invoke 完成後處理
+  // 中斷 → kill process → run_claude 返回 → invoke resolve → 自動送出排隊訊息
 }
 </script>
 

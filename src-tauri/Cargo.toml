@@ -1,6 +1,6 @@
 [package]
 name = "tsunu-alive"
-version = "0.1.4"
+version = "0.1.5"
 description = "Tsunu Alive - 阿宇陪你寫程式"
 authors = ["阿童 ATone and her Claude Code (楊竣宇 AYu)"]
 edition = "2021"
