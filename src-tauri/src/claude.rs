@@ -58,6 +58,9 @@ pub enum ClaudeEvent {
         context_window_max: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_window_used_percent: Option<f64>,
+        // 本次 turn 的 input token 數（用於追蹤 system-reminder 注入造成的 token 膨脹）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens_this_turn: Option<u64>,
     },
     // Compact 完成（對話摘要壓縮）
     Compacted {
@@ -874,6 +877,7 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 total_tokens_in_conversation,
                 context_window_max,
                 context_window_used_percent,
+                input_tokens_this_turn: if self.last_turn_input_tokens > 0 { Some(self.last_turn_input_tokens) } else { None },
             });
         }
         "progress" => {
@@ -1096,12 +1100,13 @@ mod tests {
         assert_eq!(complete_events.len(), 1);
 
         match complete_events[0] {
-            ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent } => {
+            ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent, input_tokens_this_turn } => {
                 assert_eq!(result, "Task completed successfully");
                 assert!((cost_usd - 0.05).abs() < 0.001);
                 assert!(total_tokens_in_conversation.is_none());
                 assert!(context_window_max.is_none());
                 assert!(context_window_used_percent.is_none());
+                assert!(input_tokens_this_turn.is_none());
             }
             _ => panic!("Expected Complete event"),
         }
@@ -1153,7 +1158,7 @@ mod tests {
         assert_eq!(complete_events.len(), 1);
 
         match complete_events[0] {
-            ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent } => {
+            ClaudeEvent::Complete { result, cost_usd, total_tokens_in_conversation, context_window_max, context_window_used_percent, input_tokens_this_turn } => {
                 assert_eq!(result, "Done");
                 assert!((cost_usd - 0.10).abs() < 0.001);
                 // 應該用 per-turn usage (12000 + 3000 = 15000)，而非累積值 (50000 + 10000 = 60000)
@@ -1161,6 +1166,8 @@ mod tests {
                 assert_eq!(*context_window_max, Some(200000));
                 // 15000 / 200000 = 7.5%
                 assert!((context_window_used_percent.unwrap() - 7.5).abs() < 0.001);
+                // input_tokens_this_turn 應為 12000
+                assert_eq!(*input_tokens_this_turn, Some(12000));
             }
             _ => panic!("Expected Complete event"),
         }

@@ -33,6 +33,7 @@ export interface ClaudeEvent {
   total_tokens_in_conversation?: number;
   context_window_max?: number;
   context_window_used_percent?: number;
+  input_tokens_this_turn?: number;
   // Edit 工具的結構化差異（ToolResult 事件）
   structured_patch?: DiffHunk[];
   // 圖片結果的 base64 資料（Read 工具讀取圖片時，ToolResult 事件）
@@ -96,6 +97,8 @@ export type EditMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 export interface ContextInfo {
   totalTokens?: number;
   maxTokens?: number;
+  inputTokensThisTurn?: number;  // 本次 turn 的 input tokens
+  inputTokensDelta?: number;     // 與上次 turn 的 input tokens 差量
 }
 
 // 應用狀態（用於事件處理）
@@ -114,6 +117,8 @@ export interface AppState {
   // Context 相關
   contextUsage: number | null;
   contextInfo: ContextInfo | null;
+  // 上一次 turn 的 input tokens（用於計算增量）
+  prevInputTokens: number | null;
   // 最後一次用戶主動發起的請求（用於 fallback 模式重新執行）
   lastPrompt: string;
   // 可用的 Skills（從 init 事件取得）
@@ -524,11 +529,22 @@ export function handleCompleteEvent(
   if (event.context_window_used_percent !== undefined) {
     stateUpdates.contextUsage = Math.round(event.context_window_used_percent);
   }
-  if (event.total_tokens_in_conversation !== undefined || event.context_window_max !== undefined) {
+  if (event.total_tokens_in_conversation !== undefined || event.context_window_max !== undefined || event.input_tokens_this_turn !== undefined) {
+    const inputTokensDelta = (event.input_tokens_this_turn !== undefined && state.prevInputTokens !== null)
+      ? event.input_tokens_this_turn - state.prevInputTokens
+      : undefined;
+
     stateUpdates.contextInfo = {
       totalTokens: event.total_tokens_in_conversation,
       maxTokens: event.context_window_max,
+      inputTokensThisTurn: event.input_tokens_this_turn,
+      inputTokensDelta,
     };
+
+    // 記錄本次 input tokens，供下次計算差量
+    if (event.input_tokens_this_turn !== undefined) {
+      stateUpdates.prevInputTokens = event.input_tokens_this_turn;
+    }
   }
 
   // 檢測 "Unknown skill: xxx" - CLI-only 命令提示
