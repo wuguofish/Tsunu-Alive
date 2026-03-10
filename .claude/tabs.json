@@ -1,0 +1,20 @@
+{
+  "activeTabId": "l7PRkT49_zrdvjptp4oJe",
+  "tabs": [
+    {
+      "createdAt": "2026-03-04T05:21:13.485Z",
+      "id": "r0aJXzbXn6b1C_h7QeWyR",
+      "order": 0,
+      "sessionId": null,
+      "title": "新對話"
+    },
+    {
+      "createdAt": "2026-03-04T05:21:24.467Z",
+      "id": "l7PRkT49_zrdvjptp4oJe",
+      "order": 1,
+      "sessionId": "9f17eb9d-cfe7-458b-b457-37285c9506c7",
+      "title": "我覺得該來寫Pycharm的外掛，好讓使用者用IntelliJ的時候，也可以知道目前選取哪一段程式碼..."
+    }
+  ],
+  "version": 1
+}

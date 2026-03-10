@@ -29,3 +29,6 @@ dist-ssr
 .claude/settings.local.json
 .claude/settings.local.json
 .claude/settings.local.json
+/intellij-plugin/.gradle
+/intellij-plugin/.intellijPlatform
+/intellij-plugin/build
