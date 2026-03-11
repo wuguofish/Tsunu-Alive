@@ -16,7 +16,7 @@ export interface DiffHunk {
 
 // Claude CLI 事件類型
 export interface ClaudeEvent {
-  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied' | 'Compacted';
+  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied' | 'Compacted' | 'ProcessExited';
   session_id?: string;
   model?: string;
   // 可用的 Skills（Init 事件）
@@ -123,6 +123,8 @@ export interface AppState {
   lastPrompt: string;
   // 可用的 Skills（從 init 事件取得）
   availableSkills: string[];
+  // 互動模式：CLI process 是否存活
+  isProcessAlive: boolean;
 }
 
 // 事件處理結果
@@ -631,6 +633,35 @@ export function handleCompactedEvent(
 }
 
 /**
+ * 處理 ProcessExited 事件（互動模式下 CLI process 結束）
+ */
+export function handleProcessExitedEvent(
+  _event: ClaudeEvent,
+  state: AppState
+): EventHandlerResult {
+  const stateUpdates: Partial<AppState> = {
+    isLoading: false,
+    avatarState: 'idle',
+    streamingText: '',
+    isProcessAlive: false,
+  };
+
+  const actions: EventAction[] = [
+    { type: 'stopBusyTextAnimation' },
+  ];
+
+  // 如果正在載入中（process 意外退出），顯示錯誤訊息
+  if (state.isLoading) {
+    actions.push({
+      type: 'addErrorMessage',
+      message: 'Claude CLI process 意外退出',
+    });
+  }
+
+  return { stateUpdates, actions };
+}
+
+/**
  * 主要事件處理函數
  */
 export function handleClaudeEvent(
@@ -656,6 +687,8 @@ export function handleClaudeEvent(
       return handleErrorEvent(event, state);
     case 'Connected':
       return handleConnectedEvent(event, state);
+    case 'ProcessExited':
+      return handleProcessExitedEvent(event, state);
     default:
       return { stateUpdates: {}, actions: [] };
   }

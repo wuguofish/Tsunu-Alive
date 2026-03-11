@@ -204,6 +204,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 
 // 是否正在等待回應
 const isLoading = ref(false);
+const isProcessAlive = ref(false);  // 互動模式：CLI process 是否存活
 
 // Toast 通知狀態
 const toastMessage = ref('');
@@ -323,7 +324,7 @@ function cycleEditMode() {
   editMode.value = modes[(currentIndex + 1) % modes.length];
 }
 
-// editMode 變更時同步到後端 permission_server
+// editMode 變更時同步到後端 permission_server + 標記需要 respawn
 // 這樣 server 才能根據模式自動允許對應的工具
 watch(editMode, async (newMode) => {
   try {
@@ -331,6 +332,8 @@ watch(editMode, async (newMode) => {
   } catch (error) {
     console.error('Failed to sync edit mode to backend:', error);
   }
+  // 互動模式：標記 process 需要 respawn（下次 ensureProcess 時重新啟動）
+  markProcessForRespawn();
 }, { immediate: true });
 
 // Extended Thinking 模式
@@ -340,6 +343,20 @@ const extendedThinking = ref(false);
 function toggleExtendedThinking() {
   extendedThinking.value = !extendedThinking.value;
   console.log('💭 Extended Thinking:', extendedThinking.value ? 'ON' : 'OFF');
+  // 互動模式：標記 process 需要 respawn
+  markProcessForRespawn();
+}
+
+// 互動模式：設定變更時標記 process 需要 respawn
+// 不立即中斷，等下次送訊息時 ensureProcess() 自然重新啟動
+async function markProcessForRespawn() {
+  if (!isProcessAlive.value) return;
+  try {
+    await invoke('interrupt_claude');
+  } catch (error) {
+    console.error('Failed to interrupt Claude for respawn:', error);
+  }
+  isProcessAlive.value = false;
 }
 
 // 工作目錄
@@ -371,6 +388,9 @@ async function selectWorkingDir() {
 
       // 更新工作目錄
       workingDir.value = selected;
+
+      // 互動模式：中斷舊 process（新目錄需要新 process）
+      await markProcessForRespawn();
 
       // 清除當前 session 狀態
       sessionId.value = null;
@@ -604,6 +624,7 @@ function getCurrentAppState(): AppState {
     prevInputTokens: prevInputTokens.value,
     lastPrompt: lastPrompt.value,
     availableSkills: availableSkills.value,
+    isProcessAlive: isProcessAlive.value,
   };
 }
 
@@ -623,9 +644,17 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
   if (stateUpdates.busyStatus !== undefined) busyStatus.value = stateUpdates.busyStatus;
   if (stateUpdates.isLoading !== undefined) {
     isLoading.value = stateUpdates.isLoading;
-    // 注意：排隊訊息的自動送出已移到 sendMessageCore 的 invoke 完成後，
-    // 避免在第一個 CLI 程序尚未結束時就啟動第二個，造成 mutex 競爭
+    // 互動模式：Complete 事件時處理排隊訊息
+    if (!stateUpdates.isLoading && pendingMessage.value) {
+      const queued = pendingMessage.value;
+      pendingMessage.value = null;
+      nextTick().then(() => {
+        userInput.value = queued;
+        sendMessage();
+      });
+    }
   }
+  if (stateUpdates.isProcessAlive !== undefined) isProcessAlive.value = stateUpdates.isProcessAlive;
   if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
   if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
   if (stateUpdates.prevInputTokens !== undefined) prevInputTokens.value = stateUpdates.prevInputTokens;
@@ -960,6 +989,9 @@ function handleCloseTab(tabId: string) {
 function handleNewConversation() {
   tabManager.clearCurrentTab();
 
+  // 互動模式：中斷舊 process（新對話需要新 session）
+  markProcessForRespawn();
+
   // 同步到 App.vue 狀態
   messages.value = [
     {
@@ -1242,8 +1274,26 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown);
 });
 
+// 確保 CLI process 已啟動（互動模式）
+// 如果 process 不存在或已退出，啟動新的 process
+async function ensureProcess(): Promise<void> {
+  if (isProcessAlive.value) return;
+
+  const permissionMode = editMode.value === 'default' ? null : editMode.value;
+
+  await invoke('start_claude', {
+    workingDir: workingDir.value,
+    sessionId: sessionId.value || null,
+    permissionMode: permissionMode,
+    extendedThinking: extendedThinking.value || null,
+  });
+
+  isProcessAlive.value = true;
+}
+
 // 送出訊息（核心函數，支援 allowedTools）
-async function sendMessageCore(content: string, extraAllowedTools: string[] = []) {
+// 互動模式：先確保 process 存在，再透過 stdin 送訊息（非阻塞）
+async function sendMessageCore(content: string, _extraAllowedTools: string[] = []) {
   // 開始載入狀態
   isLoading.value = true;
   avatarState.value = 'thinking';
@@ -1252,28 +1302,16 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
   currentToolUses.value = [];  // 清空當前請求的工具追蹤（舊的已保存在 messages 中）
   deniedToolsThisRequest.value.clear();  // 清空這次請求累積的被拒絕工具
 
-  // 合併 session 白名單和額外的工具
-  const allAllowedTools = [
-    ...sessionAllowedTools.value,
-    ...extraAllowedTools
-  ];
-
-  // 權限模式直接傳給 CLI
-  // - default 不傳（CLI 預設行為，所有工具觸發 hook）
-  // - acceptEdits/bypassPermissions/plan 直接傳給 CLI
-  // permission_server 的 edit_mode 邏輯在 default/acceptEdits 模式下補充處理
-  const permissionMode = editMode.value === 'default' ? null : editMode.value;
-
   try {
-    // 呼叫 Rust 端送出訊息給 Claude CLI
-    await invoke('send_to_claude', {
-      prompt: content,
-      workingDir: workingDir.value,  // 使用當前選擇的專案目錄
-      allowedTools: allAllowedTools.length > 0 ? allAllowedTools : null,
-      permissionMode: permissionMode,
-      extendedThinking: extendedThinking.value || null,
-      resumeSessionId: sessionId.value || null,  // 傳遞當前 session ID 以恢復對話
+    // 確保 CLI process 已啟動
+    await ensureProcess();
+
+    // 透過 stdin 送訊息給長駐的 CLI process（非阻塞，立即返回）
+    await invoke('send_message', {
+      message: content,
     });
+    // 注意：不再 await CLI 完成，回應透過 claude-event 事件串流回來
+    // 排隊訊息的處理已移到 applyEventResult 的 Complete 事件中
   } catch (error) {
     console.error('Failed to send to Claude:', error);
     isLoading.value = false;
@@ -1285,18 +1323,6 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
       role: 'assistant',
       items: [{ type: 'text', content: `*皺眉* 連接 Claude 時發生錯誤：${error}` }]
     });
-  }
-
-  // CLI 程序已完全結束（invoke resolved），安全地送出排隊中的訊息
-  // 重要：必須在 invoke 完成後才送出，否則兩個 run_claude 會同時執行，
-  // 第二個 CLI 的 Init 事件需要取得 process mutex lock，
-  // 而第一個 run_claude 正持有 lock 等待 child exit → 造成 mutex 競爭
-  if (pendingMessage.value) {
-    const queued = pendingMessage.value;
-    pendingMessage.value = null;
-    await nextTick();
-    userInput.value = queued;
-    await sendMessage();
   }
 }
 
@@ -2518,8 +2544,7 @@ async function interruptRequest() {
   streamingText.value = '';
   currentToolUses.value = [];
 
-  // 注意：排隊訊息的自動送出由 sendMessageCore 的 invoke 完成後處理
-  // 中斷 → kill process → run_claude 返回 → invoke resolve → 自動送出排隊訊息
+  // 互動模式：排隊訊息由 applyEventResult 在 Complete 事件時自動送出
 }
 </script>
 

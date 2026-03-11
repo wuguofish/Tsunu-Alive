@@ -31,9 +31,11 @@ async fn start_claude(
     state: State<'_, AppState>,
     working_dir: Option<String>,
     session_id: Option<String>,
+    permission_mode: Option<String>,
+    extended_thinking: Option<bool>,
 ) -> Result<(), String> {
     let process = state.claude_process.clone();
-    claude::start_claude(app, process, working_dir, session_id).await
+    claude::start_claude(app, process, working_dir, session_id, permission_mode, extended_thinking).await
 }
 
 /// 發送訊息給 Claude（互動模式）
@@ -1271,6 +1273,23 @@ async fn respond_to_permission(
     behavior: String,
     message: Option<String>,
 ) -> Result<(), String> {
+    // 優先嘗試互動模式路徑（control_response via stdin）
+    let process = state.claude_process.clone();
+    {
+        let proc = process.lock().await;
+        if proc.stdin_writer.is_some() {
+            // 互動模式：透過 stdin 送 control_response
+            drop(proc); // 釋放鎖，send_control_response 會重新取得
+            return claude::send_control_response(
+                &process,
+                &tool_use_id,
+                &behavior,
+                message.as_deref(),
+            ).await;
+        }
+    }
+
+    // Fallback: HTTP permission server 路徑（單次模式）
     let mut perm_state = state.permission_state.lock().await;
 
     if let Some(tx) = perm_state.pending.remove(&tool_use_id) {

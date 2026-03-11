@@ -72,6 +72,8 @@ pub enum ClaudeEvent {
     },
     // 連線狀態
     Connected,
+    // CLI process 已退出（互動模式下 process 結束時發送）
+    ProcessExited,
 }
 
 // 全域的 Claude 程序管理
@@ -91,7 +93,50 @@ impl Default for ClaudeProcess {
     }
 }
 
-// 發送給 Claude CLI 的訊息格式
+// 發送給 Claude CLI 的訊息格式（互動模式，匹配 VS Code extension 格式）
+#[derive(Debug, Serialize)]
+struct InteractiveUserMessage {
+    #[serde(rename = "type")]
+    msg_type: String,
+    session_id: String,
+    parent_tool_use_id: Option<String>,
+    #[serde(rename = "isSynthetic")]
+    is_synthetic: bool,
+    message: InteractiveMessageContent,
+}
+
+#[derive(Debug, Serialize)]
+struct InteractiveMessageContent {
+    role: String,
+    content: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+}
+
+impl InteractiveUserMessage {
+    fn new(content: &str) -> Self {
+        Self {
+            msg_type: "user".to_string(),
+            session_id: String::new(),
+            parent_tool_use_id: None,
+            is_synthetic: false,
+            message: InteractiveMessageContent {
+                role: "user".to_string(),
+                content: vec![ContentBlock {
+                    block_type: "text".to_string(),
+                    text: content.to_string(),
+                }],
+            },
+        }
+    }
+}
+
+// 舊版訊息格式（單次模式 fallback 用）
 #[derive(Debug, Serialize)]
 struct UserMessage {
     #[serde(rename = "type")]
@@ -249,24 +294,36 @@ const GUI_SYSTEM_PROMPT: &str = r#"You are running inside "tsunu_alive" (阿宇�
 - 只有 Skill 工具的指令可以使用（顯示在斜線選單中）
 - 一般工具（Bash, Read, Edit, Write, Grep, Glob 等）正常運作"#;
 
-/// 啟動 Claude CLI 程序（使用 stream-json 雙向通訊）
+/// 啟動 Claude CLI 程序（互動式長駐模式，匹配 VS Code extension 架構）
+///
+/// 不使用 `-p` 單次模式，而是透過 stdin/stdout 雙向 JSON 通訊。
+/// Process 會持續運行，直到被 interrupt_claude() 終止或 CLI 自行退出。
 pub async fn start_claude(
     app: AppHandle,
     process: Arc<Mutex<ClaudeProcess>>,
     working_dir: Option<String>,
     session_id: Option<String>,
+    permission_mode: Option<String>,
+    extended_thinking: Option<bool>,
 ) -> Result<(), String> {
+    // 先中斷舊的 process（如果有的話）
+    {
+        let mut proc = process.lock().await;
+        if let Some(ref mut child) = proc.child {
+            let _ = child.kill().await;
+        }
+        proc.child = None;
+        proc.stdin_writer = None;
+    }
+
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
     let mut cmd = create_claude_command();
-    cmd.arg("-p")
-        .arg("--input-format")
-        .arg("stream-json")
-        .arg("--output-format")
-        .arg("stream-json")
+    // 互動模式核心參數（不帶 -p）
+    cmd.arg("--input-format").arg("stream-json")
+        .arg("--output-format").arg("stream-json")
         .arg("--verbose")
-        .arg("--append-system-prompt")
-        .arg(GUI_SYSTEM_PROMPT)
+        .arg("--permission-prompt-tool").arg("stdio")
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -275,6 +332,16 @@ pub async fn start_claude(
     // 如果有 session_id，繼續該 session
     if let Some(sid) = &session_id {
         cmd.arg("--resume").arg(sid);
+    }
+
+    // 權限模式
+    if let Some(mode) = &permission_mode {
+        cmd.arg("--permission-mode").arg(mode);
+    }
+
+    // Extended thinking
+    if extended_thinking.unwrap_or(false) {
+        cmd.arg("--thinking");
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
@@ -288,6 +355,29 @@ pub async fn start_claude(
         proc.child = Some(child);
         proc.stdin_writer = Some(stdin);
         proc.session_id = session_id;
+    }
+
+    // 送出 initialize 訊息（VS Code extension 在 spawn 後第一件事就是送這個）
+    {
+        let init_msg = serde_json::json!({
+            "type": "initialize",
+            "hooks": {},
+            "sdkMcpServers": {},
+            "jsonSchema": serde_json::Value::Null,
+            "systemPrompt": serde_json::Value::Null,
+            "appendSystemPrompt": GUI_SYSTEM_PROMPT,
+            "agents": {},
+            "promptSuggestions": serde_json::Value::Null
+        });
+        let mut proc = process.lock().await;
+        if let Some(ref mut stdin) = proc.stdin_writer {
+            let json_str = serde_json::to_string(&init_msg)
+                .map_err(|e| format!("Failed to serialize initialize: {}", e))?;
+            stdin.write_all(format!("{}\n", json_str).as_bytes()).await
+                .map_err(|e| format!("Failed to write initialize: {}", e))?;
+            stdin.flush().await
+                .map_err(|e| format!("Failed to flush initialize: {}", e))?;
+        }
     }
 
     // 發送連線成功事件
@@ -308,6 +398,17 @@ pub async fn start_claude(
 
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(json) => {
+                    // 檢查是否為 control_request（權限審核等）
+                    let msg_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if msg_type == "control_request" {
+                        handle_control_request(&app_clone, &process_clone, &json).await;
+                        continue;
+                    }
+                    // 忽略 keep_alive
+                    if msg_type == "keep_alive" {
+                        continue;
+                    }
+
                     let events = parser.parse(&json);
                     for evt in events {
                         // 如果是 Init 事件，儲存 session_id
@@ -324,19 +425,20 @@ pub async fn start_claude(
             }
         }
 
-        // 程序結束時清理
+        // 程序結束時清理並通知前端
         let mut proc = process_clone.lock().await;
         if let Some(ref mut child) = proc.child {
             let _ = child.wait().await;
         }
         proc.child = None;
         proc.stdin_writer = None;
+        let _ = app_clone.emit("claude-event", ClaudeEvent::ProcessExited);
     });
 
     Ok(())
 }
 
-/// 發送訊息給 Claude CLI
+/// 發送訊息給 Claude CLI（互動模式，透過 stdin）
 pub async fn send_message(
     process: Arc<Mutex<ClaudeProcess>>,
     message: String,
@@ -344,7 +446,7 @@ pub async fn send_message(
     let mut proc = process.lock().await;
 
     if let Some(ref mut stdin) = proc.stdin_writer {
-        let user_msg = UserMessage::new(&message);
+        let user_msg = InteractiveUserMessage::new(&message);
         let json = serde_json::to_string(&user_msg)
             .map_err(|e| format!("Failed to serialize message: {}", e))?;
 
@@ -358,6 +460,98 @@ pub async fn send_message(
             .await
             .map_err(|e| format!("Failed to flush stdin: {}", e))?;
 
+        Ok(())
+    } else {
+        Err("Claude process not running".to_string())
+    }
+}
+
+/// 不需要用戶確認的工具列表（與 permission_server.rs 和前端 autoAllowTools.ts 同步）
+const AUTO_ALLOW_TOOLS: &[&str] = &[
+    "AskUserQuestion", "TodoRead", "TodoWrite",
+    "Read", "Glob", "Grep",
+    "Task", "TaskOutput",
+    "WebSearch", "WebFetch",
+    "CronCreate", "CronDelete", "CronList",
+    "EnterPlanMode",
+];
+
+/// 處理來自 CLI 的 control_request（如權限審核）
+///
+/// CLI 在需要權限審核時會透過 stdout 送出 control_request，
+/// 我們需要透過 stdin 回送 control_response。
+async fn handle_control_request(
+    app: &AppHandle,
+    process: &Arc<Mutex<ClaudeProcess>>,
+    json: &serde_json::Value,
+) {
+    let request_id = json.get("request_id")
+        .or_else(|| json.get("request").and_then(|r| r.get("request_id")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // 嘗試取得工具名稱（permission prompt 的 control_request 格式）
+    let tool_name = json.get("request")
+        .and_then(|r| r.get("tool_name").or_else(|| r.get("toolName")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let tool_input = json.get("request")
+        .and_then(|r| r.get("tool_input").or_else(|| r.get("input")))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    // 檢查是否在自動允許列表中
+    if AUTO_ALLOW_TOOLS.contains(&tool_name) {
+        // 自動允許，直接回送 control_response
+        let _ = send_control_response(process, &request_id, "allow", None).await;
+        return;
+    }
+
+    // 需要用戶確認，emit 事件到前端
+    // 前端收到後會顯示 PermissionDialog，用戶選擇後呼叫 respond_to_permission
+    // 欄位名稱與 permission_server.rs 的 Hook 事件保持一致
+    // tool_use_id 在互動模式下實際是 control_request 的 request_id
+    let _ = app.emit("permission-request", serde_json::json!({
+        "tool_use_id": request_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "session_id": "",
+    }));
+}
+
+/// 透過 stdin 回送 control_response 給 CLI
+pub async fn send_control_response(
+    process: &Arc<Mutex<ClaudeProcess>>,
+    request_id: &str,
+    behavior: &str,
+    message: Option<&str>,
+) -> Result<(), String> {
+    let mut response_data = serde_json::json!({
+        "behavior": behavior
+    });
+    if let Some(msg) = message {
+        response_data["message"] = serde_json::Value::String(msg.to_string());
+    }
+
+    let control_response = serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": response_data
+        }
+    });
+
+    let mut proc = process.lock().await;
+    if let Some(ref mut stdin) = proc.stdin_writer {
+        let json_str = serde_json::to_string(&control_response)
+            .map_err(|e| format!("Failed to serialize control_response: {}", e))?;
+        stdin.write_all(format!("{}\n", json_str).as_bytes()).await
+            .map_err(|e| format!("Failed to write control_response: {}", e))?;
+        stdin.flush().await
+            .map_err(|e| format!("Failed to flush control_response: {}", e))?;
         Ok(())
     } else {
         Err("Claude process not running".to_string())
@@ -1192,5 +1386,134 @@ mod tests {
 
         let events = parse_claude_output(&json);
         assert!(events.is_empty());
+    }
+
+    // === 互動模式訊息格式測試 ===
+
+    #[test]
+    fn test_interactive_user_message_format() {
+        let msg = InteractiveUserMessage::new("Hello, Claude!");
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "user");
+        assert_eq!(json["session_id"], "");
+        assert_eq!(json["parent_tool_use_id"], serde_json::Value::Null);
+        assert_eq!(json["isSynthetic"], false);
+        assert_eq!(json["message"]["role"], "user");
+        assert_eq!(json["message"]["content"][0]["type"], "text");
+        assert_eq!(json["message"]["content"][0]["text"], "Hello, Claude!");
+    }
+
+    #[test]
+    fn test_interactive_user_message_content_is_array() {
+        // VS Code extension 格式要求 content 是陣列，不是字串
+        let msg = InteractiveUserMessage::new("test");
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert!(json["message"]["content"].is_array());
+        assert_eq!(json["message"]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_control_response_format_allow() {
+        // 驗證 control_response JSON 結構（模擬 send_control_response 內部邏輯）
+        let request_id = "req-abc-123";
+        let behavior = "allow";
+
+        let control_response = json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {
+                    "behavior": behavior
+                }
+            }
+        });
+
+        assert_eq!(control_response["type"], "control_response");
+        assert_eq!(control_response["response"]["subtype"], "success");
+        assert_eq!(control_response["response"]["request_id"], "req-abc-123");
+        assert_eq!(control_response["response"]["response"]["behavior"], "allow");
+    }
+
+    #[test]
+    fn test_control_response_format_deny_with_message() {
+        let control_response = json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": "req-deny-456",
+                "response": {
+                    "behavior": "deny",
+                    "message": "使用者拒絕了這個操作"
+                }
+            }
+        });
+
+        assert_eq!(control_response["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            control_response["response"]["response"]["message"],
+            "使用者拒絕了這個操作"
+        );
+    }
+
+    #[test]
+    fn test_auto_allow_tools_contains_expected() {
+        // 驗證 AUTO_ALLOW_TOOLS 包含常用的安全工具
+        assert!(AUTO_ALLOW_TOOLS.contains(&"Read"));
+        assert!(AUTO_ALLOW_TOOLS.contains(&"Glob"));
+        assert!(AUTO_ALLOW_TOOLS.contains(&"Grep"));
+        assert!(AUTO_ALLOW_TOOLS.contains(&"TodoWrite"));
+        assert!(AUTO_ALLOW_TOOLS.contains(&"CronCreate"));
+        assert!(AUTO_ALLOW_TOOLS.contains(&"WebSearch"));
+    }
+
+    #[test]
+    fn test_auto_allow_tools_excludes_dangerous() {
+        // 驗證 AUTO_ALLOW_TOOLS 不包含需要審核的危險工具
+        assert!(!AUTO_ALLOW_TOOLS.contains(&"Bash"));
+        assert!(!AUTO_ALLOW_TOOLS.contains(&"Edit"));
+        assert!(!AUTO_ALLOW_TOOLS.contains(&"Write"));
+    }
+
+    #[test]
+    fn test_parse_control_request_permission() {
+        // 模擬 CLI 發送的 control_request
+        let json = json!({
+            "type": "control_request",
+            "request": {
+                "type": "permission",
+                "request_id": "perm-req-001",
+                "tool_name": "Bash",
+                "input": {
+                    "command": "ls -la"
+                }
+            }
+        });
+
+        // 驗證可以正確解析欄位
+        let request = &json["request"];
+        assert_eq!(request["type"], "permission");
+        assert_eq!(request["request_id"], "perm-req-001");
+        assert_eq!(request["tool_name"], "Bash");
+        assert_eq!(request["input"]["command"], "ls -la");
+    }
+
+    #[test]
+    fn test_initialize_message_format() {
+        // 驗證 initialize 訊息的結構
+        let init_msg = json!({
+            "type": "initialize",
+            "appendSystemPrompt": GUI_SYSTEM_PROMPT,
+            "hooks": {},
+            "sdkMcpServers": {},
+            "permissionMode": "default"
+        });
+
+        assert_eq!(init_msg["type"], "initialize");
+        assert!(init_msg["appendSystemPrompt"].as_str().unwrap().contains("tsunu_alive"));
+        assert!(init_msg["hooks"].is_object());
+        assert!(init_msg["sdkMcpServers"].is_object());
     }
 }
