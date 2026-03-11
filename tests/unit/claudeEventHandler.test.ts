@@ -400,7 +400,7 @@ describe('claudeEventHandler', () => {
         expect(result.stateUpdates.deniedToolsThisRequest?.has('AskUserQuestion')).toBe(true)
       })
 
-      it('shows permission dialog for Read tool (not a meta tool)', () => {
+      it('auto-allows Read tool without showing permission dialog', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
@@ -412,13 +412,12 @@ describe('claudeEventHandler', () => {
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        // Read 不是 META_TOOL，應該顯示對話框
-        expect(result.stateUpdates.pendingPermission).toBeDefined()
-        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Read')
+        // Read 是 AUTO_ALLOW_TOOL，自動跳過不顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
         expect(result.stateUpdates.deniedToolsThisRequest?.has('Read')).toBe(true)
       })
 
-      it('shows permission dialog for Glob tool (not a meta tool)', () => {
+      it('auto-allows Glob tool without showing permission dialog', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
@@ -430,13 +429,12 @@ describe('claudeEventHandler', () => {
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        // Glob 不是 META_TOOL，應該顯示對話框
-        expect(result.stateUpdates.pendingPermission).toBeDefined()
-        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Glob')
+        // Glob 是 AUTO_ALLOW_TOOL，自動跳過不顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
         expect(result.stateUpdates.deniedToolsThisRequest?.has('Glob')).toBe(true)
       })
 
-      it('shows permission dialog for Grep tool (not a meta tool)', () => {
+      it('auto-allows Grep tool without showing permission dialog', () => {
         const state = createDefaultState()
 
         const event: ClaudeEvent = {
@@ -448,9 +446,8 @@ describe('claudeEventHandler', () => {
 
         const result = handlePermissionDeniedEvent(event, state)
 
-        // Grep 不是 META_TOOL，應該顯示對話框
-        expect(result.stateUpdates.pendingPermission).toBeDefined()
-        expect(result.stateUpdates.pendingPermission?.toolName).toBe('Grep')
+        // Grep 是 AUTO_ALLOW_TOOL，自動跳過不顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
         expect(result.stateUpdates.deniedToolsThisRequest?.has('Grep')).toBe(true)
       })
 
@@ -495,7 +492,7 @@ describe('claudeEventHandler', () => {
         expect(writeResult.stateUpdates.deniedToolsThisRequest?.has('TodoWrite')).toBe(true)
       })
 
-      it('shows permission dialog for WebSearch and WebFetch (not meta tools)', () => {
+      it('auto-allows WebSearch and WebFetch without showing permission dialog', () => {
         const state = createDefaultState()
 
         const searchEvent: ClaudeEvent = {
@@ -506,9 +503,8 @@ describe('claudeEventHandler', () => {
         }
 
         const result = handlePermissionDeniedEvent(searchEvent, state)
-        // WebSearch 不是 META_TOOL，應該顯示對話框
-        expect(result.stateUpdates.pendingPermission).toBeDefined()
-        expect(result.stateUpdates.pendingPermission?.toolName).toBe('WebSearch')
+        // WebSearch 是 AUTO_ALLOW_TOOL，自動跳過不顯示對話框
+        expect(result.stateUpdates.pendingPermission).toBeUndefined()
         expect(result.stateUpdates.deniedToolsThisRequest?.has('WebSearch')).toBe(true)
 
         const state2 = createDefaultState()
@@ -520,9 +516,8 @@ describe('claudeEventHandler', () => {
         }
 
         const result2 = handlePermissionDeniedEvent(fetchEvent, state2)
-        // WebFetch 不是 META_TOOL，應該顯示對話框
-        expect(result2.stateUpdates.pendingPermission).toBeDefined()
-        expect(result2.stateUpdates.pendingPermission?.toolName).toBe('WebFetch')
+        // WebFetch 是 AUTO_ALLOW_TOOL，自動跳過不顯示對話框
+        expect(result2.stateUpdates.pendingPermission).toBeUndefined()
         expect(result2.stateUpdates.deniedToolsThisRequest?.has('WebFetch')).toBe(true)
       })
 
@@ -829,7 +824,7 @@ describe('claudeEventHandler', () => {
       const result = handleErrorEvent(event, state)
 
       expect(result.stateUpdates.isLoading).toBe(false)
-      expect(result.stateUpdates.avatarState).toBe('idle')
+      expect(result.stateUpdates.avatarState).toBe('error')
       expect(result.actions).toContainEqual({
         type: 'addErrorMessage',
         message: 'Connection failed',

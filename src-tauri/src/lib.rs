@@ -48,27 +48,6 @@ async fn send_message(
     claude::send_message(process, message).await
 }
 
-/// 發送訊息給 Claude（單次模式）
-#[tauri::command]
-async fn send_to_claude(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    prompt: String,
-    working_dir: Option<String>,
-    allowed_tools: Option<Vec<String>>,
-    permission_mode: Option<String>,
-    extended_thinking: Option<bool>,
-    resume_session_id: Option<String>,
-) -> Result<(), String> {
-    // session_id 直接使用前端傳入的值：
-    // - 有值 → 繼續該對話
-    // - None → 開始新對話
-    let process = state.claude_process.clone();
-    let session_id = resume_session_id;
-
-    // 執行 Claude CLI
-    claude::run_claude(app, process, prompt, working_dir, session_id, allowed_tools, permission_mode, extended_thinking).await
-}
 
 /// 中斷 Claude 程序
 #[tauri::command]
@@ -1588,7 +1567,6 @@ pub fn run() {
             greet,
             start_claude,
             send_message,
-            send_to_claude,
             interrupt_claude,
             get_session_id,
             clear_session,
