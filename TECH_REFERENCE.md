@@ -60,6 +60,78 @@ This session is being continued from a previous conversation that ran out of con
 - [Context Management System - DeepWiki](https://deepwiki.com/FlorianBruniaux/claude-code-ultimate-guide/3.2-the-compact-command)
 - [Understanding Auto-Compact - Medium](https://lalatenduswain.medium.com/understanding-context-left-until-auto-compact-0-in-claude-cli-b7f6e43a62dc)
 
+### Claude Code 各前端互動模式比較（2026-03-12 調查）
+
+| 前端 | 互動模式 | CLI 參數 | Process 生命週期 | Session-scoped 功能 | 排程支援 |
+|------|----------|---------|---------------------|---------------------|----------|
+| **CLI 互動式終端** | 長駐互動 | （預設） | 持續運行直到退出 | ✅ CronCreate 等正常運作 | session-scoped，退出即消失 |
+| **VS Code 延伸套件** | 長駐 stdio 雙向 JSON | `--output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio` | 持續運行，由延伸套件管理 | ✅ 同上 | 同上 |
+| **Desktop App** | 自有 scheduler | 排程觸發時產生全新 session | 排程觸發時產生全新 session | N/A（自己管排程） | 持久化在 `~/.claude/scheduled-tasks/` |
+| **Tsunu Alive（本專案）** | 單次模式 | `-p --resume --output-format stream-json` | 每次訊息結束後退出 | ❌ CronCreate 建立後立即消失 | ❌ 需自行實作 scheduler |
+
+**重要發現（2026-03-12 VS Code 延伸套件 source code 逆向分析）：**
+
+VS Code 延伸套件（v2.1.73）的通訊架構：
+
+```
+VS Code Extension
+       ↓
+  child_process.spawn("claude", [
+    "--output-format", "stream-json",
+    "--input-format", "stream-json",     ← 關鍵！stdin 也接收 JSON
+    "--verbose",
+    "--permission-prompt-tool", "stdio"  ← 權限也走 stdio 雙向協議
+  ])
+       ↓
+  ┌──────────────────────────────────────────┐
+  │  Claude CLI（長駐 process）               │
+  │  stdin  ← Extension 寫入 JSON 訊息       │
+  │  stdout → CLI 輸出 JSON 訊息（逐行 NDJSON）│
+  └──────────────────────────────────────────┘
+```
+
+- **不是** `-p` 單次模式，而是長駐互動 process
+- stdio 配置：`["pipe", "pipe", N]`（stdin/stdout 都是 pipe）
+- stdout 用 `readline.createInterface()` 逐行讀取 JSON
+- stdin 用 `.write(json + "\n")` 寫入訊息
+- **雙向控制協議**：CLI 發 `control_request`（如權限審核），Extension 回 `control_response`
+- 訊息類型：`control_request`、`control_response`、`control_cancel_request`、`result`、`keep_alive`
+
+**額外 CLI 參數（依選項添加）：**
+- `--thinking adaptive|disabled|enabled` + `--max-thinking-tokens`
+- `--model` / `--resume` / `--continue` / `--session-id` / `--fork-session`
+- `--resume-session-at` / `--no-session-persistence`
+- `--mcp-config` / `--tools` / `--allowedTools` / `--disallowedTools`
+- `--effort` / `--max-turns` / `--max-budget-usd`
+
+**結論：**
+- Tsunu Alive 目前的單次模式架構與官方 VS Code 延伸套件差異很大
+- 官方做法是長駐 stdio 雙向 JSON 通訊，**非** `-p` 單次模式
+- 改為長駐模式可解鎖：即時權限審核、CronCreate 排程、keep_alive 心跳等功能
+
+**官方文件：**
+- CLI 排程：https://code.claude.com/docs/en/scheduled-tasks
+- Desktop 排程：https://code.claude.com/docs/en/desktop （「Schedule recurring tasks」段落）
+- VS Code 延伸套件：https://code.claude.com/docs/en/vs-code
+- Agent SDK：https://platform.claude.com/docs/en/agent-sdk/overview
+
+### Agent SDK（2026-03-12 調查）
+
+**套件**：`@anthropic-ai/claude-agent-sdk`（TypeScript）/ `claude-agent-sdk`（Python）
+
+**與 CLI `-p` 模式的比較：**
+
+| 面向 | CLI `-p` 模式 | Agent SDK |
+|------|--------------|-----------|
+| 認證 | Claude Code 訂閱（Pro/Max） | **ANTHROPIC_API_KEY**（API 計費，另外付費） |
+| 串流 | `--output-format stream-json`（需自行 parse） | 原生 async iterator |
+| Hooks | shell 腳本 | native callback function |
+| Session | `--resume <session_id>` | `resume: sessionId` |
+| 排程 | ❌ process 結束即消失 | ❌ 每次 `query()` 仍是單次完成 |
+
+**重要限制**：Agent SDK 需要 `ANTHROPIC_API_KEY`，不能用 Claude Code 訂閱。
+對 Tsunu Alive 定位（使用者現有 Claude Code 訂閱，不額外增加費用）是 blocker。
+
 ### 權限模式
 
 | 模式 | 參數 | 說明 |

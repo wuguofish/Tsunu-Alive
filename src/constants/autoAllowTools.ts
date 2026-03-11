@@ -48,6 +48,13 @@ const WEB_READ_ONLY_TOOLS = [
   'WebFetch',
 ] as const;
 
+// 排程管理工具（建立、刪除、列出定時任務）
+const CRON_TOOLS = [
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+] as const;
+
 // Plan 模式相關（進入 Plan 模式不需要確認）
 const PLAN_MODE_TOOLS = [
   'EnterPlanMode',
@@ -62,6 +69,7 @@ export const AUTO_ALLOW_TOOLS = [
   ...READ_ONLY_TOOLS,
   ...SUBAGENT_TOOLS,
   ...WEB_READ_ONLY_TOOLS,
+  ...CRON_TOOLS,
   ...PLAN_MODE_TOOLS,
 ] as const;
 
@@ -84,5 +92,6 @@ export const AUTO_ALLOW_CATEGORIES = {
   readOnly: READ_ONLY_TOOLS,
   subagent: SUBAGENT_TOOLS,
   webReadOnly: WEB_READ_ONLY_TOOLS,
+  cron: CRON_TOOLS,
   planMode: PLAN_MODE_TOOLS,
 } as const;

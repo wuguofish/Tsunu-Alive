@@ -32,6 +32,12 @@ describe('autoAllowTools', () => {
       expect(AUTO_ALLOW_TOOLS).toContain('WebFetch')
     })
 
+    it('contains cron tools', () => {
+      expect(AUTO_ALLOW_TOOLS).toContain('CronCreate')
+      expect(AUTO_ALLOW_TOOLS).toContain('CronDelete')
+      expect(AUTO_ALLOW_TOOLS).toContain('CronList')
+    })
+
     it('contains plan mode tools', () => {
       expect(AUTO_ALLOW_TOOLS).toContain('EnterPlanMode')
     })
@@ -98,6 +104,7 @@ describe('autoAllowTools', () => {
       expect(AUTO_ALLOW_CATEGORIES).toHaveProperty('readOnly')
       expect(AUTO_ALLOW_CATEGORIES).toHaveProperty('subagent')
       expect(AUTO_ALLOW_CATEGORIES).toHaveProperty('webReadOnly')
+      expect(AUTO_ALLOW_CATEGORIES).toHaveProperty('cron')
       expect(AUTO_ALLOW_CATEGORIES).toHaveProperty('planMode')
     })
 
@@ -108,6 +115,7 @@ describe('autoAllowTools', () => {
         ...AUTO_ALLOW_CATEGORIES.readOnly,
         ...AUTO_ALLOW_CATEGORIES.subagent,
         ...AUTO_ALLOW_CATEGORIES.webReadOnly,
+        ...AUTO_ALLOW_CATEGORIES.cron,
         ...AUTO_ALLOW_CATEGORIES.planMode,
       ]
 
@@ -128,8 +136,9 @@ describe('autoAllowTools', () => {
     it('documents expected tools count for sync verification', () => {
       // 如果這個數字改變，需要同步更新 permission_server.rs
       // 目前：AskUserQuestion, TodoRead, TodoWrite, Read, Glob, Grep,
-      //       Task, TaskOutput, WebSearch, WebFetch, EnterPlanMode
-      expect(AUTO_ALLOW_TOOLS.length).toBe(11)
+      //       Task, TaskOutput, WebSearch, WebFetch,
+      //       CronCreate, CronDelete, CronList, EnterPlanMode
+      expect(AUTO_ALLOW_TOOLS.length).toBe(14)
     })
 
     it('lists all tools for easy comparison with Rust', () => {
@@ -145,6 +154,9 @@ describe('autoAllowTools', () => {
         'TaskOutput',
         'WebSearch',
         'WebFetch',
+        'CronCreate',
+        'CronDelete',
+        'CronList',
         'EnterPlanMode',
       ]
 

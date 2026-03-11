@@ -430,23 +430,35 @@ avatarState 更新
 
 ### 研究發現：IDE 插件的實作方式
 
-經過研究 VS Code 和 JetBrains 的 Claude Code 插件，發現它們**並非**使用即時互動式 stdin 來做權限確認，而是採用「後處理」模式：
+#### ~~初期研究結論（已過時）~~
+
+~~經過研究 VS Code 和 JetBrains 的 Claude Code 插件，發現它們並非使用即時互動式 stdin 來做權限確認，而是採用「後處理」模式。~~
+
+#### 更正：VS Code 延伸套件 source code 逆向分析結果（2026-03-12）
+
+經過直接分析 VS Code 延伸套件 v2.1.73 的 source code，發現官方**就是用 stdin/stdout 雙向 JSON 通訊**，包含即時權限審核：
 
 ```
-使用者發送訊息
+Extension spawn("claude", [
+  "--output-format", "stream-json",
+  "--input-format", "stream-json",
+  "--permission-prompt-tool", "stdio"
+])
     ↓
-Claude CLI 執行（default 權限模式）
+Claude CLI 長駐運行
     ↓
 Claude 想要使用工具（例如 Edit）
     ↓
-CLI 自動拒絕（因為沒有預授權）
+CLI 透過 stdout 發送 control_request（權限審核請求）
     ↓
-回傳結果時帶有 permission_denials 欄位
+Extension 收到，顯示 Diff 讓使用者確認
     ↓
-IDE 收到這個資訊，顯示 Diff 讓使用者確認
+使用者確認後 → Extension 透過 stdin 回送 control_response
     ↓
-使用者確認後 → 用 --allowedTools 重新請求執行
+CLI 收到授權，繼續執行工具
 ```
+
+**Tsunu Alive 目前的做法**（`-p` 單次模式 + `permission_denials` 後處理）是可行的 workaround，但與官方做法不同。詳見 TECH_REFERENCE.md「Claude Code 各前端互動模式比較」。
 
 ### 實作方案
 
