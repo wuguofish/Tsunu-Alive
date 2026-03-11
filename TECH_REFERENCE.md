@@ -67,7 +67,7 @@ This session is being continued from a previous conversation that ran out of con
 | **CLI 互動式終端** | 長駐互動 | （預設） | 持續運行直到退出 | ✅ CronCreate 等正常運作 | session-scoped，退出即消失 |
 | **VS Code 延伸套件** | 長駐 stdio 雙向 JSON | `--output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio` | 持續運行，由延伸套件管理 | ✅ 同上 | 同上 |
 | **Desktop App** | 自有 scheduler | 排程觸發時產生全新 session | 排程觸發時產生全新 session | N/A（自己管排程） | 持久化在 `~/.claude/scheduled-tasks/` |
-| **Tsunu Alive（本專案）** | 單次模式 | `-p --resume --output-format stream-json` | 每次訊息結束後退出 | ❌ CronCreate 建立後立即消失 | ❌ 需自行實作 scheduler |
+| **Tsunu Alive（本專案）** | 長駐 stdio 雙向 JSON | `--output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio` | 持續運行，由 Tauri 後端管理 | ✅ CronCreate 等正常運作 | session-scoped，退出即消失 |
 
 **重要發現（2026-03-12 VS Code 延伸套件 source code 逆向分析）：**
 
@@ -105,9 +105,9 @@ VS Code Extension
 - `--effort` / `--max-turns` / `--max-budget-usd`
 
 **結論：**
-- Tsunu Alive 目前的單次模式架構與官方 VS Code 延伸套件差異很大
-- 官方做法是長駐 stdio 雙向 JSON 通訊，**非** `-p` 單次模式
-- 改為長駐模式可解鎖：即時權限審核、CronCreate 排程、keep_alive 心跳等功能
+- ✅ Tsunu Alive 已於 v0.1.6 遷移至與 VS Code 延伸套件相同的長駐 stdio 雙向 JSON 架構
+- 支援即時權限審核（control_request/control_response）、CronCreate 排程、keep_alive 心跳等功能
+- 分支：`feat/interactive-stdio-mode`
 
 **官方文件：**
 - CLI 排程：https://code.claude.com/docs/en/scheduled-tasks
@@ -372,3 +372,5 @@ cd src-tauri && cargo test
 ## 更新日誌
 
 - 2026-01-23：建立文件，整理 Claude CLI compact 機制
+- 2026-03-12：新增 VS Code 延伸套件逆向分析、Agent SDK 調查、各前端模式比較
+- 2026-03-12：Tsunu Alive 遷移至互動式 stdio 長駐模式（與 VS Code 延伸套件相同架構）

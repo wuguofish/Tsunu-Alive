@@ -53,12 +53,16 @@
 │                  ▼                   │
 │  ┌─────────────────────────────────┐│
 │  │      Tauri Backend (Rust)       ││
-│  │      呼叫 Claude CLI 指令        ││
+│  │  管理 Claude CLI 長駐 process    ││
+│  │  stdin ← JSON 訊息 / 權限回覆   ││
+│  │  stdout → NDJSON 事件串流        ││
 │  └─────────────────────────────────┘│
-│                  │                   │
-│                  ▼                   │
+│              ↕ stdio                 │
 │  ┌─────────────────────────────────┐│
-│  │           Claude CLI            ││
+│  │     Claude CLI（長駐 process）    ││
+│  │  --input-format stream-json     ││
+│  │  --output-format stream-json    ││
+│  │  --permission-prompt-tool stdio ││
 │  │  ┌───────────┬────────────────┐ ││
 │  │  │ CLAUDE.md │  /uni Skill    │ ││
 │  │  │ (精簡人設) │ (完整RP設定)   │ ││
@@ -75,6 +79,7 @@
 | 前端框架 | Vue 3 | 開發者（阿童）熟悉 |
 | 後端語言 | Rust | Tauri 原生支援 |
 | AI 核心 | Claude CLI | 使用者現有工具，不額外增加費用 |
+| CLI 互動模式 | 長駐 stdio 雙向 JSON | 與 VS Code 延伸套件相同架構 |
 
 ## Token 節省策略
 
@@ -104,7 +109,7 @@
 - [x] 確認基本 Hello World 可運行
 
 ### Phase 2：核心功能 ✅ 完成
-- [x] 實作與 Claude CLI 的串接（-p 模式 + stream-json 輸出）
+- [x] 實作與 Claude CLI 的串接（~~-p 模式~~ → 互動式 stdio 長駐模式）
 - [x] 建立基本對話介面
 - [x] 整合阿宇 Avatar 顯示
 - [x] Markdown 渲染 + 程式碼高亮
@@ -416,9 +421,9 @@ avatarState 更新
 
 | 類別 | 測試數量 |
 | ------ | ---------- |
-| 前端 (Vitest) | 82 |
-| 後端 (Rust) | 23 |
-| **總計** | **105** |
+| 前端 (Vitest) | 133 |
+| 後端 (Rust) | 23+ |
+| **總計** | **156+** |
 
 ### CI 整合（可選）
 
@@ -458,60 +463,47 @@ Extension 收到，顯示 Diff 讓使用者確認
 CLI 收到授權，繼續執行工具
 ```
 
-**Tsunu Alive 目前的做法**（`-p` 單次模式 + `permission_denials` 後處理）是可行的 workaround，但與官方做法不同。詳見 TECH_REFERENCE.md「Claude Code 各前端互動模式比較」。
+**✅ 已遷移**：Tsunu Alive 已改為與 VS Code 延伸套件相同的 `--permission-prompt-tool stdio` 架構，使用 `control_request`/`control_response` 即時權限審核。
 
-### 實作方案
+### 實作方案（互動式 stdio 模式）
 
-#### 權限模式選項
+#### 權限處理流程
 
-1. **Allow All（信任模式）**
-   - 使用 `--permission-mode bypassPermissions`
-   - 所有工具自動允許，不詢問
-   - 適合：信任的專案、快速開發
-
-2. **Ask Before Edit（預設模式）**
-   - 使用 default 權限模式
-   - 被拒絕的工具會記錄在 `permission_denials`
-   - 前端顯示 PermissionDialog 讓使用者確認
-   - 確認後用 `--allowedTools` 重新執行
-
-3. **Plan Mode（最安全）**
-   - 使用 `--permission-mode plan`
-   - Claude 只規劃不執行，使用者審核後手動執行
-
-#### 使用者確認後的處理
-
-當使用者在 PermissionDialog 點擊確認時：
-
-| 使用者選擇 | 動作 |
-|-----------|------|
-| **Yes** | 用 `--allowedTools "ToolName"` 重新執行該請求 |
-| **Yes, allow all this session** | 將該工具加入 session 白名單，後續請求自動帶 `--allowedTools` |
-| **Yes, always allow** | 將該工具寫入專案設定，永久允許 |
-| **No** | 不執行，告知 Claude 使用者拒絕 |
-| **Custom response** | 發送自訂訊息給 Claude，說明為何拒絕或要求修改 |
-
-#### Session 白名單管理
-
-```typescript
-// 前端狀態
-const sessionAllowedTools = ref<Set<string>>(new Set());
-
-// 發送請求時
-const allowedToolsArg = sessionAllowedTools.value.size > 0
-  ? `--allowedTools "${[...sessionAllowedTools.value].join(',')}"`
-  : '';
 ```
+Claude CLI 想使用工具（如 Edit）
+    ↓
+CLI 透過 stdout 發送 control_request
+    ↓
+Rust 後端收到，檢查 AUTO_ALLOW_TOOLS 白名單
+    ↓
+白名單內 → 自動回送 control_response（allow）
+白名單外 → 發送 permission-request 事件到前端
+    ↓
+前端顯示 PermissionDialog，使用者確認
+    ↓
+前端呼叫 respond_to_permission → 回送 control_response
+    ↓
+CLI 收到授權，繼續執行工具
+```
+
+#### AUTO_ALLOW_TOOLS（自動放行清單）
+
+Rust 後端 `claude.rs` 的 `AUTO_ALLOW_TOOLS` 常數：
+- 唯讀工具：Read, Glob, Grep
+- 元工具：AskUserQuestion, TodoRead, TodoWrite, Task, TaskOutput
+- 網路工具：WebSearch, WebFetch
+- 排程工具：CronCreate, CronDelete, CronList
+- 規劃工具：EnterPlanMode
+
+前端 `autoAllowTools.ts` 有對應的白名單（需手動同步）。
 
 ### 目前狀態
 
 - [x] PermissionDialog 元件已建立，UI 完整
-- [x] 後端支援解析 `permission_denials` 並發送 `PermissionDenied` 事件
-- [x] 實作「確認後重新執行」邏輯
-- [x] 實作 session 白名單管理
-  - 採用「白名單機制」：使用者點 "Yes, allow all this session" 後，將所有被拒絕的工具加入白名單
-  - 比起切換到 auto 模式，白名單機制提供更細緻的控制（acceptEdits 只允許檔案編輯，不含 Bash/WebSearch）
-- [x] 實作專案級白名單持久化（寫入 .claude/settings.local.json）
+- [x] ~~後端支援解析 `permission_denials` 並發送 `PermissionDenied` 事件~~（已改為 control_request 即時審核）
+- [x] ~~實作「確認後重新執行」邏輯~~（不再需要，權限即時審核）
+- [x] 實作 AUTO_ALLOW_TOOLS 自動放行機制（Rust 後端）
+- [x] 前端 `isMetaTool()` 安全網（fallback，防止漏網的 PermissionDenied 事件）
 - [x] 新增權限模式切換 UI（循環切換，與 IDE 插件設計一致）
 
 ## 阿宇記憶系統設計
