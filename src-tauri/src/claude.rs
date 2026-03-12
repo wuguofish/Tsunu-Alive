@@ -136,31 +136,6 @@ impl InteractiveUserMessage {
     }
 }
 
-// 舊版訊息格式（單次模式 fallback 用）
-#[derive(Debug, Serialize)]
-struct UserMessage {
-    #[serde(rename = "type")]
-    msg_type: String,
-    message: MessageContent,
-}
-
-#[derive(Debug, Serialize)]
-struct MessageContent {
-    role: String,
-    content: String,
-}
-
-impl UserMessage {
-    fn new(content: &str) -> Self {
-        Self {
-            msg_type: "user".to_string(),
-            message: MessageContent {
-                role: "user".to_string(),
-                content: content.to_string(),
-            },
-        }
-    }
-}
 
 /// 建立 Claude CLI 的 Command
 /// Windows 上 .cmd 檔案無法正確處理多行參數，所以直接用 node 執行 cli.js
@@ -428,7 +403,19 @@ pub async fn start_claude(
         // 程序結束時清理並通知前端
         let mut proc = process_clone.lock().await;
         if let Some(ref mut child) = proc.child {
-            let _ = child.wait().await;
+            match child.wait().await {
+                Ok(status) if !status.success() => {
+                    let _ = app_clone.emit("claude-event", ClaudeEvent::Error {
+                        message: format!("Claude CLI exited with status: {}", status),
+                    });
+                }
+                Err(e) => {
+                    let _ = app_clone.emit("claude-event", ClaudeEvent::Error {
+                        message: format!("Failed to wait for Claude CLI: {}", e),
+                    });
+                }
+                _ => {}
+            }
         }
         proc.child = None;
         proc.stdin_writer = None;
