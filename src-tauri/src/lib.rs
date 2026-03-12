@@ -34,6 +34,8 @@ async fn start_claude(
     permission_mode: Option<String>,
     extended_thinking: Option<bool>,
 ) -> Result<(), String> {
+    eprintln!("🚀 start_claude called: working_dir={:?}, session_id={:?}, permission_mode={:?}, extended_thinking={:?}",
+        working_dir, session_id, permission_mode, extended_thinking);
     let process = state.claude_process.clone();
     claude::start_claude(app, process, working_dir, session_id, permission_mode, extended_thinking).await
 }
@@ -1251,6 +1253,7 @@ async fn respond_to_permission(
     tool_use_id: String,
     behavior: String,
     message: Option<String>,
+    cli_tool_use_id: Option<String>,
 ) -> Result<(), String> {
     // 優先嘗試互動模式路徑（control_response via stdin）
     let process = state.claude_process.clone();
@@ -1258,11 +1261,16 @@ async fn respond_to_permission(
         let proc = process.lock().await;
         if proc.stdin_writer.is_some() {
             // 互動模式：透過 stdin 送 control_response
-            drop(proc); // 釋放鎖，send_control_response 會重新取得
+            // tool_use_id = control_request 的 request_id
+            // cli_tool_use_id = CLI 工具呼叫的 ID（用於 response 的 toolUseID 欄位）
+            drop(proc);
+            // 前端呼叫時暫無 tool_input，傳 None（CLI 會用原始 input）
             return claude::send_control_response(
                 &process,
                 &tool_use_id,
                 &behavior,
+                cli_tool_use_id.as_deref(),
+                None,
                 message.as_deref(),
             ).await;
         }

@@ -81,6 +81,8 @@ pub struct ClaudeProcess {
     pub child: Option<Child>,
     pub stdin_writer: Option<tokio::process::ChildStdin>,
     pub session_id: Option<String>,
+    /// 目前的權限模式（由前端設定，用於 control_request 判斷）
+    pub permission_mode: Option<String>,
 }
 
 impl Default for ClaudeProcess {
@@ -89,6 +91,7 @@ impl Default for ClaudeProcess {
             child: None,
             stdin_writer: None,
             session_id: None,
+            permission_mode: None,
         }
     }
 }
@@ -294,6 +297,9 @@ pub async fn start_claude(
     let cwd = working_dir.unwrap_or_else(|| ".".to_string());
 
     let mut cmd = create_claude_command();
+    // 避免 "nested session" 檢查（僅開發環境：在 Claude Code terminal 裡跑 tauri dev 時會遇到）
+    #[cfg(debug_assertions)]
+    cmd.env_remove("CLAUDECODE");
     // 互動模式核心參數（不帶 -p）
     cmd.arg("--input-format").arg("stream-json")
         .arg("--output-format").arg("stream-json")
@@ -309,9 +315,12 @@ pub async fn start_claude(
         cmd.arg("--resume").arg(sid);
     }
 
-    // 權限模式
-    if let Some(mode) = &permission_mode {
-        cmd.arg("--permission-mode").arg(mode);
+    // 權限模式：只有 plan 模式需要傳給 CLI（影響 Claude 行為，不只是權限）
+    // 其他模式（default, acceptEdits, bypassPermissions）由我們透過 control_request 自行處理
+    if let Some(ref mode) = permission_mode {
+        if mode == "plan" {
+            cmd.arg("--permission-mode").arg(mode);
+        }
     }
 
     // Extended thinking
@@ -322,7 +331,16 @@ pub async fn start_claude(
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
     let stdin = child.stdin.take().ok_or("Failed to capture stdin")?;
+
+    // 讀取 stderr 並輸出到 eprintln（debug 用）
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            eprintln!("[Claude CLI stderr] {}", line);
+        }
+    });
 
     // 儲存 child 和 stdin
     {
@@ -330,20 +348,33 @@ pub async fn start_claude(
         proc.child = Some(child);
         proc.stdin_writer = Some(stdin);
         proc.session_id = session_id;
+        proc.permission_mode = permission_mode;
     }
 
-    // 送出 initialize 訊息（VS Code extension 在 spawn 後第一件事就是送這個）
+    // 送出 initialize 訊息（透過 control_request 包裝，與 VS Code extension SDK 格式一致）
+    // SDK 的 request() 方法會將 initialize 包成 control_request 送到 CLI stdin，
+    // CLI 處理完後會回送 control_response（在 stdout reader 中忽略即可）
     {
+        let request_id = format!("init-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis());
         let init_msg = serde_json::json!({
-            "type": "initialize",
-            "hooks": {},
-            "sdkMcpServers": {},
-            "jsonSchema": serde_json::Value::Null,
-            "systemPrompt": serde_json::Value::Null,
-            "appendSystemPrompt": GUI_SYSTEM_PROMPT,
-            "agents": {},
-            "promptSuggestions": serde_json::Value::Null
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "initialize",
+                "hooks": {},
+                "sdkMcpServers": serde_json::Value::Null,
+                "jsonSchema": serde_json::Value::Null,
+                "systemPrompt": serde_json::Value::Null,
+                "appendSystemPrompt": GUI_SYSTEM_PROMPT,
+                "agents": serde_json::Value::Null,
+                "promptSuggestions": serde_json::Value::Null,
+                "agentProgressSummaries": serde_json::Value::Null
+            }
         });
+        eprintln!("📤 initialize control_request: {}", serde_json::to_string_pretty(&init_msg).unwrap_or_default());
         let mut proc = process.lock().await;
         if let Some(ref mut stdin) = proc.stdin_writer {
             let json_str = serde_json::to_string(&init_msg)
@@ -381,6 +412,15 @@ pub async fn start_claude(
                     }
                     // 忽略 keep_alive
                     if msg_type == "keep_alive" {
+                        continue;
+                    }
+                    // 忽略 control_response（CLI 回應我們的 control_request，例如 initialize）
+                    if msg_type == "control_response" {
+                        eprintln!("📥 control_response from CLI: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                        continue;
+                    }
+                    // 忽略 streamlined 類型
+                    if msg_type == "streamlined_text" || msg_type == "streamlined_tool_use_summary" {
                         continue;
                     }
 
@@ -478,49 +518,99 @@ async fn handle_control_request(
         .unwrap_or("")
         .to_string();
 
+    // Debug: 印出完整 control_request 結構
+    eprintln!("🔑 control_request: {}", serde_json::to_string_pretty(json).unwrap_or_default());
+
     // 嘗試取得工具名稱（permission prompt 的 control_request 格式）
     let tool_name = json.get("request")
         .and_then(|r| r.get("tool_name").or_else(|| r.get("toolName")))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let tool_use_id = json.get("request")
+        .and_then(|r| r.get("tool_use_id").or_else(|| r.get("toolUseId")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     let tool_input = json.get("request")
         .and_then(|r| r.get("tool_input").or_else(|| r.get("input")))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    // 檢查是否在自動允許列表中
-    if AUTO_ALLOW_TOOLS.contains(&tool_name) {
-        // 自動允許，直接回送 control_response
-        let _ = send_control_response(process, &request_id, "allow", None).await;
+    // 根據 permission_mode 決定是否自動放行
+    let permission_mode = {
+        let proc = process.lock().await;
+        proc.permission_mode.clone().unwrap_or_else(|| "default".to_string())
+    };
+
+    let should_auto_allow = match permission_mode.as_str() {
+        // bypassPermissions：所有工具自動放行（ExitPlanMode 例外，需使用者確認）
+        "bypassPermissions" => tool_name != "ExitPlanMode",
+        // acceptEdits：AUTO_ALLOW_TOOLS + 編輯相關工具自動放行
+        "acceptEdits" => {
+            AUTO_ALLOW_TOOLS.contains(&tool_name)
+                || matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash")
+        }
+        // default / plan：只有 AUTO_ALLOW_TOOLS 自動放行
+        _ => AUTO_ALLOW_TOOLS.contains(&tool_name),
+    };
+
+    if should_auto_allow {
+        let _ = send_control_response(process, &request_id, "allow", Some(&tool_use_id), Some(&tool_input), None).await;
         return;
     }
 
     // 需要用戶確認，emit 事件到前端
     // 前端收到後會顯示 PermissionDialog，用戶選擇後呼叫 respond_to_permission
-    // 欄位名稱與 permission_server.rs 的 Hook 事件保持一致
-    // tool_use_id 在互動模式下實際是 control_request 的 request_id
+    // request_id: control_request 的 ID（用於回送 control_response）
+    // tool_use_id: CLI 工具呼叫的 ID（用於 control_response 的 toolUseID 欄位）
     let _ = app.emit("permission-request", serde_json::json!({
         "tool_use_id": request_id,
         "tool_name": tool_name,
         "tool_input": tool_input,
         "session_id": "",
+        "cli_tool_use_id": tool_use_id,
     }));
 }
 
 /// 透過 stdin 回送 control_response 給 CLI
+///
+/// CLI 的 Zod 驗證期望 response.response 是一個 union type：
+/// - 允許：`{ updatedInput: Record<string, any>, toolUseID: string }` （必須有 updatedInput）
+/// - 拒絕：`{ behavior: "deny", message: string, toolUseID: string }`
 pub async fn send_control_response(
     process: &Arc<Mutex<ClaudeProcess>>,
     request_id: &str,
     behavior: &str,
+    tool_use_id: Option<&str>,
+    tool_input: Option<&serde_json::Value>,
     message: Option<&str>,
 ) -> Result<(), String> {
-    let mut response_data = serde_json::json!({
-        "behavior": behavior
-    });
-    if let Some(msg) = message {
-        response_data["message"] = serde_json::Value::String(msg.to_string());
-    }
+    let response_data = if behavior == "allow" {
+        // 允許：必須同時帶 behavior + updatedInput（Zod union 要求兩者都有）
+        // VS Code extension: return { behavior: "allow", updatedInput: U, toolUseID: ... }
+        let mut data = serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": tool_input.unwrap_or(&serde_json::Value::Object(serde_json::Map::new()))
+        });
+        if let Some(id) = tool_use_id {
+            data["toolUseID"] = serde_json::Value::String(id.to_string());
+        }
+        data
+    } else {
+        // 拒絕：帶 behavior: "deny" + message
+        let mut data = serde_json::json!({
+            "behavior": "deny"
+        });
+        if let Some(id) = tool_use_id {
+            data["toolUseID"] = serde_json::Value::String(id.to_string());
+        }
+        if let Some(msg) = message {
+            data["message"] = serde_json::Value::String(msg.to_string());
+        }
+        data
+    };
 
     let control_response = serde_json::json!({
         "type": "control_response",
@@ -530,6 +620,8 @@ pub async fn send_control_response(
             "response": response_data
         }
     });
+
+    eprintln!("📤 control_response: {}", serde_json::to_string_pretty(&control_response).unwrap_or_default());
 
     let mut proc = process.lock().await;
     if let Some(ref mut stdin) = proc.stdin_writer {
@@ -1294,9 +1386,10 @@ mod tests {
 
     #[test]
     fn test_control_response_format_allow() {
-        // 驗證 control_response JSON 結構（模擬 send_control_response 內部邏輯）
+        // 驗證 control_response JSON 結構（匹配 VS Code extension SDK 格式）
+        // 允許時必須同時帶 behavior: "allow" + updatedInput（Zod union type 要求）
         let request_id = "req-abc-123";
-        let behavior = "allow";
+        let tool_input = json!({"file_path": "/tmp/test.txt"});
 
         let control_response = json!({
             "type": "control_response",
@@ -1304,7 +1397,9 @@ mod tests {
                 "subtype": "success",
                 "request_id": request_id,
                 "response": {
-                    "behavior": behavior
+                    "behavior": "allow",
+                    "updatedInput": tool_input,
+                    "toolUseID": "toolu_test123"
                 }
             }
         });
@@ -1313,6 +1408,8 @@ mod tests {
         assert_eq!(control_response["response"]["subtype"], "success");
         assert_eq!(control_response["response"]["request_id"], "req-abc-123");
         assert_eq!(control_response["response"]["response"]["behavior"], "allow");
+        assert_eq!(control_response["response"]["response"]["updatedInput"]["file_path"], "/tmp/test.txt");
+        assert_eq!(control_response["response"]["response"]["toolUseID"], "toolu_test123");
     }
 
     #[test]
@@ -1324,7 +1421,8 @@ mod tests {
                 "request_id": "req-deny-456",
                 "response": {
                     "behavior": "deny",
-                    "message": "使用者拒絕了這個操作"
+                    "message": "使用者拒絕了這個操作",
+                    "toolUseID": "toolu_deny789"
                 }
             }
         });

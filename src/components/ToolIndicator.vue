@@ -93,6 +93,7 @@ const KNOWN_TOOLS = [
   'NotebookEdit', 'KillShell', 'Skill',
   'EnterPlanMode', 'ExitPlanMode',
   'Agent', 'ToolSearch',
+  'CronCreate', 'CronDelete', 'CronList',
 ] as const;
 
 // TodoWrite 的待辦事項類型
