@@ -1254,23 +1254,26 @@ async fn respond_to_permission(
     behavior: String,
     message: Option<String>,
     cli_tool_use_id: Option<String>,
+    updated_input: Option<serde_json::Value>,
 ) -> Result<(), String> {
     // 優先嘗試互動模式路徑（control_response via stdin）
     let process = state.claude_process.clone();
     {
-        let proc = process.lock().await;
+        let mut proc = process.lock().await;
         if proc.stdin_writer.is_some() {
             // 互動模式：透過 stdin 送 control_response
             // tool_use_id = control_request 的 request_id
             // cli_tool_use_id = CLI 工具呼叫的 ID（用於 response 的 toolUseID 欄位）
+            // 若前端提供 updated_input（如 AskUserQuestion 帶用戶答案），優先使用
+            // 否則從 pending_tool_inputs 取回原始 tool_input
+            let tool_input = updated_input.or_else(|| proc.pending_tool_inputs.remove(&tool_use_id));
             drop(proc);
-            // 前端呼叫時暫無 tool_input，傳 None（CLI 會用原始 input）
             return claude::send_control_response(
                 &process,
                 &tool_use_id,
                 &behavior,
                 cli_tool_use_id.as_deref(),
-                None,
+                tool_input.as_ref(),
                 message.as_deref(),
             ).await;
         }

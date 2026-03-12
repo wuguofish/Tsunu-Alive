@@ -3,7 +3,6 @@
  * 提取自 App.vue，用於測試和重用
  */
 
-import { isAutoAllowTool } from '../constants/autoAllowTools';
 
 // structuredPatch 的 hunk 類型（Edit 工具的差異資訊）
 export interface DiffHunk {
@@ -16,7 +15,7 @@ export interface DiffHunk {
 
 // Claude CLI 事件類型
 export interface ClaudeEvent {
-  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'PermissionDenied' | 'Compacted' | 'ProcessExited';
+  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'Compacted' | 'ProcessExited';
   session_id?: string;
   model?: string;
   // 可用的 Skills（Init 事件）
@@ -50,6 +49,7 @@ export interface PendingPermission {
   input: Record<string, unknown>;
   isFromHook?: boolean;  // 是否來自 PermissionRequest Hook（新機制）
   sessionId?: string;    // Session ID（用於 Hook 模式的白名單管理）
+  cliToolUseId?: string; // CLI 工具呼叫的原始 ID（互動模式用）
   originalPrompt?: string;  // 觸發這個權限請求的原始 prompt（用於 fallback 模式重新執行）
 }
 
@@ -261,132 +261,7 @@ export function handleToolUseEvent(
   };
 }
 
-/**
- * 判斷工具是否應該自動跳過 PermissionDenied 對話框
- *
- * 包含兩類工具：
- * 1. AUTO_ALLOW_TOOLS（與 permission_server 同步）- 只讀工具等
- * 2. ExitPlanMode - 由專門的 plan-approval-request 事件處理
- *
- * 背景：Claude CLI 的 PermissionRequest hook 有 bug (#29212)，
- * 即使工具被 auto-allow，有時仍會發出 PermissionDenied 事件到 stream。
- * 這裡作為前端的安全網，避免誤觸對話框。
- */
-function isMetaTool(toolName: string): boolean {
-  // AUTO_ALLOW_TOOLS 包含：AskUserQuestion, Read, Glob, Grep,
-  // TodoRead, TodoWrite, Task, TaskOutput, WebSearch, WebFetch, EnterPlanMode
-  if (isAutoAllowTool(toolName)) return true;
-  // ExitPlanMode 走專用的 plan-approval 流程，不在這裡彈對話框
-  if (toolName === 'ExitPlanMode') return true;
-  return false;
-}
-
-/**
- * 處理 PermissionDenied 事件
- *
- * 邏輯：
- * 1. 「元工具」（AskUserQuestion、EnterPlanMode 等）：自動跳過，不顯示對話框
- * 2. 其他工具（包括 Read、Glob、Grep 等）：顯示對話框讓用戶確認
- *
- * 這樣既保留了元工具的自動處理，又確保只讀工具在特殊情況下（如讀取敏感路徑）可以讓用戶決定
- */
-export function handlePermissionDeniedEvent(
-  event: ClaudeEvent,
-  state: AppState
-): EventHandlerResult {
-  if (!event.tool_name || !event.tool_id) {
-    return { stateUpdates: {}, actions: [] };
-  }
-
-  // 「元工具」自動跳過，不顯示對話框
-  if (isMetaTool(event.tool_name)) {
-    console.log(`🔓 Auto-skipping meta tool: ${event.tool_name}`);
-    const deniedToolsThisRequest = new Set(state.deniedToolsThisRequest);
-    deniedToolsThisRequest.add(event.tool_name);
-    return {
-      stateUpdates: { deniedToolsThisRequest },
-      actions: [],
-    };
-  }
-
-  // 其他工具：顯示權限確認對話框
-  const messages = [...state.messages];
-  const currentToolUses = [...state.currentToolUses];
-  const deniedToolsThisRequest = new Set(state.deniedToolsThisRequest);
-
-  // 取得或建立 assistant 訊息
-  let assistantMsg = messages[messages.length - 1];
-  if (!assistantMsg || assistantMsg.role !== 'assistant') {
-    assistantMsg = { role: 'assistant', items: [] };
-    messages.push(assistantMsg);
-  }
-
-  // 加入或更新工具使用記錄
-  // 注意：收到 PermissionDenied 表示這個工具已經被 CLI 拒絕了
-  // 在非 Hook 模式下，CLI 會同時告訴 Claude API「權限被拒絕」
-  // 所以這個工具已經失敗了，需要標記為 isCancelled
-  let existingTool = assistantMsg.items.find(
-    (item): item is { type: 'tool'; tool: ToolUseItem } =>
-      item.type === 'tool' && item.tool.id === event.tool_id
-  );
-
-  if (!existingTool) {
-    const newTool: ToolUseItem = {
-      id: event.tool_id,
-      type: event.tool_name,
-      name: event.tool_name,
-      input: event.input || {},
-      isCancelled: true,  // 標記為已取消（權限被拒絕）
-      userResponse: 'Permission denied',
-    };
-
-    assistantMsg.items.push({ type: 'tool', tool: newTool });
-
-    if (!currentToolUses.find(t => t.id === event.tool_id)) {
-      currentToolUses.push(newTool);
-    }
-  } else {
-    // 更新已存在的工具
-    existingTool.tool.isCancelled = true;
-    existingTool.tool.userResponse = 'Permission denied';
-  }
-
-  // 同時更新 currentToolUses 中的工具
-  const toolInList = currentToolUses.find(t => t.id === event.tool_id);
-  if (toolInList) {
-    toolInList.isCancelled = true;
-    toolInList.userResponse = 'Permission denied';
-  }
-
-  // 累積被拒絕的工具
-  deniedToolsThisRequest.add(event.tool_name);
-
-  const stateUpdates: Partial<AppState> = {
-    messages,
-    currentToolUses,
-    deniedToolsThisRequest,
-    streamingText: '', // 清空累積的文字，讓工具後的文字從新開始
-  };
-
-  const actions: EventAction[] = [];
-
-  // 只有當還沒有待確認的對話框時才設定
-  // 信任 Claude CLI 的事件系統：收到 PermissionDenied 就表示需要用戶確認
-  if (!state.pendingPermission) {
-    stateUpdates.pendingPermission = {
-      toolName: event.tool_name,
-      toolId: event.tool_id,
-      input: event.input || {},
-      // 保存原始 prompt，用於 fallback 模式重新執行
-      originalPrompt: state.lastPrompt,
-    };
-    stateUpdates.avatarState = 'waiting';
-    stateUpdates.busyStatus = '等待確認...';
-    actions.push({ type: 'stopBusyTextAnimation' });
-  }
-
-  return { stateUpdates, actions };
-}
+// PermissionDenied 事件已移除 — 互動模式下權限透過 control_request/control_response 即時處理
 
 /**
  * 處理 ToolResult 事件
@@ -485,16 +360,8 @@ export function handleToolResultEvent(
     currentToolUses,
   };
 
-  // 判斷是否為「權限未授予」的錯誤（會接著收到 PermissionDenied 事件）
-  const isPermissionError = event.is_error && event.result &&
-    (event.result.includes("haven't granted") || event.result.includes('permission'));
-
-  if (event.is_error && !isPermissionError) {
-    // 真正的錯誤才顯示 error 表情
+  if (event.is_error) {
     stateUpdates.avatarState = 'error';
-  } else if (isPermissionError) {
-    // 權限未授予：顯示 waiting 表情，等待 PermissionDenied 事件和用戶確認
-    stateUpdates.avatarState = 'waiting';
   } else if (tool?.name === 'ExitPlanMode') {
     // ExitPlanMode 成功 → 計畫批准（OK 手勢）
     stateUpdates.avatarState = 'planApproved';
@@ -675,8 +542,6 @@ export function handleClaudeEvent(
       return handleTextEvent(event, state);
     case 'ToolUse':
       return handleToolUseEvent(event, state);
-    case 'PermissionDenied':
-      return handlePermissionDeniedEvent(event, state);
     case 'ToolResult':
       return handleToolResultEvent(event, state);
     case 'Compacted':

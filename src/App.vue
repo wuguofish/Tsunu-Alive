@@ -560,6 +560,9 @@ interface Question {
 interface PendingQuestion {
   toolId: string;
   questions: Question[];
+  // 互動模式：control_request 的資訊，用於透過 control_response 回傳答案
+  _controlRequestId?: string;
+  _cliToolUseId?: string;
 }
 
 // 待回答的問題（AskUserQuestion 工具）
@@ -845,6 +848,7 @@ interface PermissionRequestEvent {
   tool_input: Record<string, unknown>;
   tool_use_id: string;
   session_id?: string;
+  cli_tool_use_id?: string;
 }
 
 // ExitPlanMode 專用事件類型
@@ -860,18 +864,38 @@ async function setupEventListeners() {
     handleClaudeEvent(event.payload);
   });
 
-  // 監聽 Permission HTTP Server 發送的權限請求（Hook 機制）
+  // 監聽權限請求事件（互動模式的 control_request 或 Hook 機制）
   unlistenPermissionRequest = await listen<PermissionRequestEvent>('permission-request', (event) => {
-    console.log('🔔 Permission request from Hook:', event.payload);
-    const { tool_name, tool_input, tool_use_id, session_id } = event.payload;
+    console.log('🔔 Permission request:', event.payload);
+    const { tool_name, tool_input, tool_use_id, session_id, cli_tool_use_id } = event.payload;
 
-    // 設定待確認的權限，標記為來自 Hook
+    // AskUserQuestion：顯示問題對話框而非權限對話框
+    if (tool_name === 'AskUserQuestion') {
+      console.log('🤔 AskUserQuestion via control_request:', tool_input);
+      const input = tool_input as { questions?: Question[] };
+      if (input?.questions && Array.isArray(input.questions)) {
+        pendingQuestion.value = {
+          toolId: tool_use_id,
+          questions: input.questions,
+          // 暫存 control_request 資訊，用於透過 control_response 回傳答案
+          _controlRequestId: tool_use_id,
+          _cliToolUseId: cli_tool_use_id,
+        };
+        avatarState.value = 'waiting';
+        busyStatus.value = '等待回答...';
+        stopBusyTextAnimation();
+      }
+      return;
+    }
+
+    // 其他工具：設定待確認的權限
     pendingPermission.value = {
       toolName: tool_name,
       toolId: tool_use_id,
       input: tool_input,
       isFromHook: true,
       sessionId: session_id,
+      cliToolUseId: cli_tool_use_id,
     };
     avatarState.value = 'waiting';
     busyStatus.value = '等待確認...';
@@ -2103,6 +2127,7 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
   const isFromHook = pendingPermission.value.isFromHook ?? false;
   const hookSessionId = pendingPermission.value.sessionId;
   const originalPrompt = pendingPermission.value.originalPrompt;
+  const cliToolUseId = pendingPermission.value.cliToolUseId;
 
   // 清除待確認的權限
   pendingPermission.value = null;
@@ -2119,11 +2144,12 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
       : (response === 'custom' ? customMessage : undefined);
 
     try {
-      // 發送決策到 Permission Server
+      // 發送決策到 Permission Server / control_response
       await invoke('respond_to_permission', {
         toolUseId: toolId,
         behavior,
         message,
+        cliToolUseId,
       });
       console.log(`✅ Permission response sent: ${behavior}`);
 
@@ -2443,6 +2469,9 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
   if (!pendingQuestion.value) return;
 
   const toolId = pendingQuestion.value.toolId;
+  const controlRequestId = pendingQuestion.value._controlRequestId;
+  const cliToolUseId = pendingQuestion.value._cliToolUseId;
+  const originalQuestions = pendingQuestion.value.questions;
   const formattedAnswer = Object.entries(answers)
     .map(([q, a]) => `${q}: ${a}`)
     .join('\n');
@@ -2451,7 +2480,7 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
   const tool = currentToolUses.value.find(t => t.id === toolId);
   if (tool) {
     tool.result = formattedAnswer;
-    tool.userAnswered = true;  // 標記用戶已回答，防止 ToolResult 覆蓋
+    tool.userAnswered = true;
   }
 
   // 同時更新 messages 中的工具（遍歷所有訊息尋找）
@@ -2472,29 +2501,62 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
   // 清除待回答的問題
   pendingQuestion.value = null;
 
-  // 將答案作為使用者訊息發送（讓 Claude 繼續）
+  // 互動模式：透過 control_response 回傳答案（updatedInput 帶用戶答案）
+  if (controlRequestId) {
+    // VS Code extension 格式：questions 保持原樣，answers 是獨立物件（key=問題文字, value=逗號分隔答案）
+    const updatedInput = {
+      questions: originalQuestions,
+      answers: answers,
+    };
+
+    console.log('📤 AskUserQuestion updatedInput:', updatedInput);
+
+    try {
+      await invoke('respond_to_permission', {
+        toolUseId: controlRequestId,
+        behavior: 'allow',
+        cliToolUseId: cliToolUseId,
+        updatedInput: updatedInput,
+      });
+      console.log('✅ AskUserQuestion answer sent via control_response');
+    } catch (err) {
+      console.error('❌ Failed to send AskUserQuestion answer:', err);
+    }
+
+    // 顯示用戶的回答在聊天視窗
+    const answerText = Object.entries(answers)
+      .map(([q, a]) => `${q}\n→ ${a}`)
+      .join('\n\n');
+    messages.value.push({
+      role: 'user',
+      items: [{ type: 'text', content: answerText }]
+    });
+    await scrollToBottom();
+    return;
+  }
+
+  // Fallback：將答案作為使用者訊息發送
   const answerText = Object.entries(answers)
     .map(([q, a]) => `${q}\n→ ${a}`)
     .join('\n\n');
 
-  // 發送答案
   messages.value.push({
     role: 'user',
     items: [{ type: 'text', content: answerText }]
   });
   await scrollToBottom();
-  // 注意：不更新 lastPrompt，因為這是對工具的回應，不是新的用戶請求
-  // 這樣在 PermissionDenied fallback 模式下重新執行時，會使用原始的用戶請求
   await sendMessageCore(answerText);
 }
 
 // 取消 AskUserQuestion
-function handleQuestionCancel() {
+async function handleQuestionCancel() {
   console.log('🔴 Question cancelled');
 
   if (!pendingQuestion.value) return;
 
   const toolId = pendingQuestion.value.toolId;
+  const controlRequestId = pendingQuestion.value._controlRequestId;
+  const cliToolUseId = pendingQuestion.value._cliToolUseId;
 
   // 更新工具使用記錄為取消
   const tool = currentToolUses.value.find(t => t.id === toolId);
@@ -2518,6 +2580,21 @@ function handleQuestionCancel() {
 
   // 清除待回答的問題
   pendingQuestion.value = null;
+
+  // 互動模式：透過 control_response 回傳拒絕
+  if (controlRequestId) {
+    try {
+      await invoke('respond_to_permission', {
+        toolUseId: controlRequestId,
+        behavior: 'deny',
+        message: '使用者取消了問題',
+        cliToolUseId: cliToolUseId,
+      });
+    } catch (err) {
+      console.error('❌ Failed to send cancel:', err);
+    }
+  }
+
   avatarState.value = 'idle';
   isLoading.value = false;
   stopBusyTextAnimation();

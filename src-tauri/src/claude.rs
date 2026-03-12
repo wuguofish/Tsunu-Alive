@@ -29,12 +29,6 @@ pub enum ClaudeEvent {
         tool_id: String,
         input: serde_json::Value,
     },
-    // 權限被拒絕（需要使用者確認）
-    PermissionDenied {
-        tool_name: String,
-        tool_id: String,
-        input: serde_json::Value,
-    },
     // 工具結果
     ToolResult {
         tool_id: String,
@@ -83,6 +77,9 @@ pub struct ClaudeProcess {
     pub session_id: Option<String>,
     /// 目前的權限模式（由前端設定，用於 control_request 判斷）
     pub permission_mode: Option<String>,
+    /// 暫存 pending permission request 的 tool_input，key = request_id
+    /// 前端確認後回應時需要帶回 updatedInput
+    pub pending_tool_inputs: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl Default for ClaudeProcess {
@@ -92,6 +89,7 @@ impl Default for ClaudeProcess {
             stdin_writer: None,
             session_id: None,
             permission_mode: None,
+            pending_tool_inputs: std::collections::HashMap::new(),
         }
     }
 }
@@ -544,16 +542,21 @@ async fn handle_control_request(
         proc.permission_mode.clone().unwrap_or_else(|| "default".to_string())
     };
 
-    let should_auto_allow = match permission_mode.as_str() {
-        // bypassPermissions：所有工具自動放行（ExitPlanMode 例外，需使用者確認）
-        "bypassPermissions" => tool_name != "ExitPlanMode",
-        // acceptEdits：AUTO_ALLOW_TOOLS + 編輯相關工具自動放行
-        "acceptEdits" => {
-            AUTO_ALLOW_TOOLS.contains(&tool_name)
-                || matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash")
+    // AskUserQuestion 永遠不 auto-allow：需要透過 control_response 的 updatedInput 回傳用戶答案
+    let should_auto_allow = if tool_name == "AskUserQuestion" {
+        false
+    } else {
+        match permission_mode.as_str() {
+            // bypassPermissions：所有工具自動放行（ExitPlanMode 例外，需使用者確認）
+            "bypassPermissions" => tool_name != "ExitPlanMode",
+            // acceptEdits：AUTO_ALLOW_TOOLS + 編輯相關工具自動放行
+            "acceptEdits" => {
+                AUTO_ALLOW_TOOLS.contains(&tool_name)
+                    || matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash")
+            }
+            // default / plan：只有 AUTO_ALLOW_TOOLS 自動放行
+            _ => AUTO_ALLOW_TOOLS.contains(&tool_name),
         }
-        // default / plan：只有 AUTO_ALLOW_TOOLS 自動放行
-        _ => AUTO_ALLOW_TOOLS.contains(&tool_name),
     };
 
     if should_auto_allow {
@@ -565,6 +568,13 @@ async fn handle_control_request(
     // 前端收到後會顯示 PermissionDialog，用戶選擇後呼叫 respond_to_permission
     // request_id: control_request 的 ID（用於回送 control_response）
     // tool_use_id: CLI 工具呼叫的 ID（用於 control_response 的 toolUseID 欄位）
+
+    // 暫存 tool_input，前端確認後回應時需要帶回 updatedInput
+    {
+        let mut proc = process.lock().await;
+        proc.pending_tool_inputs.insert(request_id.clone(), tool_input.clone());
+    }
+
     let _ = app.emit("permission-request", serde_json::json!({
         "tool_use_id": request_id,
         "tool_name": tool_name,
@@ -1000,39 +1010,15 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                     context_window_max, context_window_used_percent);
             }
 
-            // 檢查是否有權限被拒絕（支援蛇底式和駝峰式）
-            let denials = json.get("permission_denials")
+            // 互動模式：permission_denials 已透過 control_request/control_response 即時處理
+            // 僅 log，不產生 PermissionDenied 事件（避免前端重複彈出對話框）
+            let denial_count = json.get("permission_denials")
                 .or_else(|| json.get("permissionDenials"))
-                .and_then(|d| d.as_array());
-
-            if let Some(denials) = denials {
-                eprintln!("🔴 Found permission_denials: {} items", denials.len());
-                for denial in denials {
-                    eprintln!("🔴 Denial item: {}", serde_json::to_string_pretty(denial).unwrap_or_default());
-
-                    // 支援蛇底式和駝峰式欄位名稱
-                    let tool_name = denial.get("tool_name")
-                        .or_else(|| denial.get("toolName"))
-                        .and_then(|n| n.as_str());
-                    let tool_id = denial.get("tool_use_id")
-                        .or_else(|| denial.get("toolUseId"))
-                        .and_then(|i| i.as_str());
-                    let input = denial.get("tool_input")
-                        .or_else(|| denial.get("toolInput"))
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-
-                    if let (Some(tool_name), Some(tool_id)) = (tool_name, tool_id) {
-                        eprintln!("🔴 Emitting PermissionDenied: tool={}, id={}", tool_name, tool_id);
-                        events.push(ClaudeEvent::PermissionDenied {
-                            tool_name: tool_name.to_string(),
-                            tool_id: tool_id.to_string(),
-                            input,
-                        });
-                    }
-                }
-            } else {
-                eprintln!("🔍 No permission_denials found in result");
+                .and_then(|d| d.as_array())
+                .map(|d| d.len())
+                .unwrap_or(0);
+            if denial_count > 0 {
+                eprintln!("ℹ️ Skipping {} permission_denials in result (already handled via control_response)", denial_count);
             }
 
             events.push(ClaudeEvent::Complete {
@@ -1171,79 +1157,6 @@ mod tests {
                 assert_eq!(input["file_path"], "/path/to/file.txt");
             }
             _ => panic!("Expected ToolUse event"),
-        }
-    }
-
-    #[test]
-    fn test_parse_permission_denied_snake_case() {
-        // 測試蛇底式欄位名稱（tool_name, tool_use_id）
-        let json = json!({
-            "type": "result",
-            "result": "",
-            "total_cost_usd": 0.01,
-            "permission_denials": [
-                {
-                    "tool_name": "Edit",
-                    "tool_use_id": "tool-456",
-                    "tool_input": {
-                        "file_path": "/path/to/edit.txt"
-                    }
-                }
-            ]
-        });
-
-        let events = parse_claude_output(&json);
-
-        // 應該有 PermissionDenied 和 Complete 兩個事件
-        let denied_events: Vec<_> = events.iter()
-            .filter(|e| matches!(e, ClaudeEvent::PermissionDenied { .. }))
-            .collect();
-
-        assert_eq!(denied_events.len(), 1);
-
-        match denied_events[0] {
-            ClaudeEvent::PermissionDenied { tool_name, tool_id, input } => {
-                assert_eq!(tool_name, "Edit");
-                assert_eq!(tool_id, "tool-456");
-                assert_eq!(input["file_path"], "/path/to/edit.txt");
-            }
-            _ => panic!("Expected PermissionDenied event"),
-        }
-    }
-
-    #[test]
-    fn test_parse_permission_denied_camel_case() {
-        // 測試駝峰式欄位名稱（toolName, toolUseId）
-        let json = json!({
-            "type": "result",
-            "result": "",
-            "total_cost_usd": 0.01,
-            "permissionDenials": [
-                {
-                    "toolName": "Bash",
-                    "toolUseId": "tool-789",
-                    "toolInput": {
-                        "command": "rm -rf /"
-                    }
-                }
-            ]
-        });
-
-        let events = parse_claude_output(&json);
-
-        let denied_events: Vec<_> = events.iter()
-            .filter(|e| matches!(e, ClaudeEvent::PermissionDenied { .. }))
-            .collect();
-
-        assert_eq!(denied_events.len(), 1);
-
-        match denied_events[0] {
-            ClaudeEvent::PermissionDenied { tool_name, tool_id, input } => {
-                assert_eq!(tool_name, "Bash");
-                assert_eq!(tool_id, "tool-789");
-                assert_eq!(input["command"], "rm -rf /");
-            }
-            _ => panic!("Expected PermissionDenied event"),
         }
     }
 
