@@ -1,17 +1,16 @@
 /**
  * 標籤頁管理 Composable
+ * 資料來源：~/.claude/projects/ 下的 sessions-index.json 或 .jsonl 檔案
  */
 
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { nanoid } from 'nanoid';
-import {
-  type TabState,
-  type TabsPersistFile,
-  createDefaultTabState,
-  extractPersistData,
-  restoreTabState,
+import type {
+  TabState,
+  SessionEntry,
 } from '../types/tabs';
+import { createDefaultTabState } from '../types/tabs';
 
 // 單例模式：全域狀態
 const tabs = ref<TabState[]>([]);
@@ -38,8 +37,7 @@ export function useTabManager() {
   const tabCount = computed(() => tabs.value.length);
 
   /**
-   * 初始化（載入持久化的標籤頁）
-   * 切換專案時也會呼叫此函數重新載入標籤頁
+   * 初始化（從 Claude CLI sessions 載入標籤頁）
    */
   async function initialize(dir: string) {
     // 如果是同一個專案且已初始化，跳過
@@ -53,19 +51,37 @@ export function useTabManager() {
     workingDir = dir;
 
     try {
-      const data = await invoke<TabsPersistFile | null>('load_tabs', { workingDir: dir });
+      const data = await invoke<{ sessions: SessionEntry[] }>('load_sessions', { workingDir: dir });
 
-      if (data && data.tabs.length > 0) {
-        // 恢復標籤頁
-        tabs.value = data.tabs.map(persist => restoreTabState(persist));
-        activeTabId.value = data.activeTabId;
+      if (data && data.sessions.length > 0) {
+        // 從 sessions 建立標籤頁（依 modified 排序，最新的在前）
+        const sorted = [...data.sessions].sort((a, b) => {
+          return (b.modified || '').localeCompare(a.modified || '');
+        });
 
-        // 確保 activeTabId 有效
-        if (!tabs.value.find(t => t.id === activeTabId.value)) {
-          activeTabId.value = tabs.value[0]?.id || null;
-        }
+        // 只取最近幾個 session 當作標籤頁（避免太多）
+        const maxTabs = 10;
+        const recentSessions = sorted.slice(0, maxTabs);
+
+        tabs.value = recentSessions.map((session, index) => {
+          const title = session.title
+            ? session.title.slice(0, 30) + (session.title.length > 30 ? '...' : '')
+            : '對話';
+          const tab = createDefaultTabState(nanoid(), title);
+          tab.sessionId = session.sessionId;
+          tab.order = index;
+          // 有 session 的標籤頁先顯示載入中的訊息
+          tab.messages = [{
+            role: 'assistant',
+            items: [{ type: 'text', content: '*翻閱之前的筆記* 讓我看看我們上次聊到哪裡...' }]
+          }];
+          return tab;
+        });
+
+        // 最新的 session 為 active
+        activeTabId.value = tabs.value[0]?.id || null;
       } else {
-        // 沒有持久化資料，建立預設標籤頁
+        // 沒有 session，建立預設標籤頁
         const defaultTab = createDefaultTabState(nanoid());
         tabs.value = [defaultTab];
         activeTabId.value = defaultTab.id;
@@ -73,8 +89,7 @@ export function useTabManager() {
 
       initialized = true;
     } catch (error) {
-      console.error('Failed to load tabs:', error);
-      // 發生錯誤時建立預設標籤頁
+      console.error('Failed to load sessions:', error);
       const defaultTab = createDefaultTabState(nanoid());
       tabs.value = [defaultTab];
       activeTabId.value = defaultTab.id;
@@ -83,34 +98,15 @@ export function useTabManager() {
   }
 
   /**
-   * 儲存標籤頁到持久化儲存
-   */
-  async function saveTabs() {
-    if (!workingDir) return;
-
-    const persistFile: TabsPersistFile = {
-      version: 1,
-      activeTabId: activeTabId.value || '',
-      tabs: tabs.value.map(extractPersistData),
-    };
-
-    try {
-      await invoke('save_tabs', { workingDir, data: persistFile });
-      console.log('💾 Tabs saved');
-    } catch (error) {
-      console.error('Failed to save tabs:', error);
-    }
-  }
-
-  /**
    * 建立新標籤頁
    */
   function createTab(title: string = '新對話'): TabState {
     const newTab = createDefaultTabState(nanoid(), title);
-    newTab.order = tabs.value.length;
-    tabs.value.push(newTab);
+    newTab.order = 0;
+    // 把現有標籤頁的 order 都往後推
+    tabs.value.forEach(t => t.order++);
+    tabs.value.unshift(newTab);
     activeTabId.value = newTab.id;
-    saveTabs();
     return newTab;
   }
 
@@ -121,7 +117,6 @@ export function useTabManager() {
     const tab = tabs.value.find(t => t.id === tabId);
     if (tab) {
       activeTabId.value = tabId;
-      saveTabs();
     }
   }
 
@@ -137,7 +132,6 @@ export function useTabManager() {
     // 如果關閉的是當前標籤頁，切換到相鄰的標籤頁
     if (activeTabId.value === tabId) {
       if (tabs.value.length > 0) {
-        // 優先切換到下一個，否則切換到上一個
         const newIndex = Math.min(index, tabs.value.length - 1);
         activeTabId.value = tabs.value[newIndex].id;
       } else {
@@ -152,8 +146,6 @@ export function useTabManager() {
     tabs.value.forEach((tab, i) => {
       tab.order = i;
     });
-
-    saveTabs();
   }
 
   /**
@@ -163,7 +155,6 @@ export function useTabManager() {
     const tab = activeTab.value;
     if (!tab) return;
 
-    // 重置標籤頁狀態
     tab.sessionId = null;
     tab.title = '新對話';
     tab.messages = [
@@ -181,8 +172,6 @@ export function useTabManager() {
     tab.isLoading = false;
     tab.pendingPermission = null;
     tab.avatarState = 'idle';
-
-    saveTabs();
   }
 
   /**
@@ -192,7 +181,6 @@ export function useTabManager() {
     const tab = tabs.value.find(t => t.id === tabId);
     if (tab) {
       tab.title = title;
-      saveTabs();
     }
   }
 
@@ -204,23 +192,22 @@ export function useTabManager() {
     const existingTab = tabs.value.find(t => t.sessionId === sessionId);
     if (existingTab) {
       activeTabId.value = existingTab.id;
-      saveTabs();
       return existingTab;
     }
 
     // 建立新標籤頁
     const newTab = createDefaultTabState(nanoid(), summary || '對話');
     newTab.sessionId = sessionId;
-    newTab.order = tabs.value.length;
+    newTab.order = 0;
+    tabs.value.forEach(t => t.order++);
     newTab.messages = [
       {
         role: 'assistant',
         items: [{ type: 'text', content: '*翻閱之前的筆記* 嗯，讓我看看我們上次聊到哪裡...' }]
       }
     ];
-    tabs.value.push(newTab);
+    tabs.value.unshift(newTab);
     activeTabId.value = newTab.id;
-    saveTabs();
     return newTab;
   }
 
@@ -230,13 +217,7 @@ export function useTabManager() {
   function updateCurrentTabState(updates: Partial<TabState>) {
     const tab = activeTab.value;
     if (!tab) return;
-
     Object.assign(tab, updates);
-
-    // 如果更新了 sessionId 或 title，儲存到持久化
-    if ('sessionId' in updates || 'title' in updates) {
-      saveTabs();
-    }
   }
 
   /**
@@ -246,18 +227,15 @@ export function useTabManager() {
     const tab = tabs.value.find(t => t.id === tabId);
     if (!tab || tab.title !== '新對話') return;
 
-    // 找到第一則用戶訊息
     const firstUserMsg = tab.messages.find(m => m.role === 'user');
     if (firstUserMsg) {
       const textItem = firstUserMsg.items.find(item => item.type === 'text');
       if (textItem && textItem.type === 'text') {
-        // 取前 30 個字元作為標題
         let title = textItem.content.slice(0, 30);
         if (textItem.content.length > 30) {
           title += '...';
         }
         tab.title = title;
-        saveTabs();
       }
     }
   }
@@ -272,7 +250,6 @@ export function useTabManager() {
 
     // 方法
     initialize,
-    saveTabs,
     createTab,
     switchTab,
     closeTab,

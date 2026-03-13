@@ -1307,11 +1307,10 @@ async function loadTabHistory(tabSessionId: string) {
     console.error('Failed to load tab history:', error);
     // Session 檔案不存在時清掉 sessionId，避免 ensureProcess 用無效 session 啟動
     sessionId.value = null;
-    // 同時清掉 tab 裡的 sessionId，下次啟動不會再嘗試載入
+    // 同時清掉 tab 裡的 sessionId
     const activeTab = tabManager.activeTab.value;
     if (activeTab) {
-      activeTab.sessionId = undefined;
-      tabManager.saveTabs();
+      activeTab.sessionId = null;
     }
   }
 }

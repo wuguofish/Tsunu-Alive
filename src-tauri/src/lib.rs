@@ -908,48 +908,124 @@ async fn add_project_permission(
 // Tab Management Commands
 // ============================================================================
 
-/// 儲存標籤頁資料到 .claude/tabs.json
-#[tauri::command]
-async fn save_tabs(working_dir: String, data: Value) -> Result<(), String> {
-    let tabs_path = PathBuf::from(&working_dir)
-        .join(".claude")
-        .join("tabs.json");
-
-    // 確保 .claude 目錄存在
-    if let Some(parent) = tabs_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .claude directory: {}", e))?;
+/// 將工作目錄轉換為 Claude CLI 的 projects 目錄名
+/// 規則：非英數字元換成 `-`，長度 ≤ 200 直接用（與 VS Code 延伸套件一致）
+fn working_dir_to_project_dir_name(working_dir: &str) -> String {
+    let name: String = working_dir.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if name.len() <= 200 {
+        name
+    } else {
+        // 太長時截斷（簡化版，不做 hash）
+        name[..200].to_string()
     }
-
-    // 寫入檔案
-    let content = serde_json::to_string_pretty(&data)
-        .map_err(|e| format!("Failed to serialize tabs data: {}", e))?;
-    fs::write(&tabs_path, content)
-        .map_err(|e| format!("Failed to write tabs file: {}", e))?;
-
-    eprintln!("💾 Tabs saved to {:?}", tabs_path);
-    Ok(())
 }
 
-/// 載入標籤頁資料從 .claude/tabs.json
-#[tauri::command]
-async fn load_tabs(working_dir: String) -> Result<Option<Value>, String> {
-    let tabs_path = PathBuf::from(&working_dir)
-        .join(".claude")
-        .join("tabs.json");
+/// 取得 Claude CLI 的 sessions 目錄路徑
+fn get_claude_project_dir(working_dir: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir_name = working_dir_to_project_dir_name(working_dir);
+    Some(home.join(".claude").join("projects").join(dir_name))
+}
 
-    if !tabs_path.exists() {
-        return Ok(None);
+/// 載入 session 列表（從 sessions-index.json 或 .jsonl 掃描）
+#[tauri::command]
+async fn load_sessions(working_dir: String) -> Result<Value, String> {
+    let project_dir = get_claude_project_dir(&working_dir)
+        .ok_or_else(|| "Cannot determine home directory".to_string())?;
+
+    if !project_dir.exists() {
+        return Ok(json!({ "sessions": [] }));
     }
 
-    let content = fs::read_to_string(&tabs_path)
-        .map_err(|e| format!("Failed to read tabs file: {}", e))?;
+    // 優先讀 sessions-index.json
+    let index_path = project_dir.join("sessions-index.json");
+    if index_path.exists() {
+        if let Ok(content) = fs::read_to_string(&index_path) {
+            if let Ok(index) = serde_json::from_str::<Value>(&content) {
+                if let Some(entries) = index.get("entries").and_then(|e| e.as_array()) {
+                    let sessions: Vec<Value> = entries.iter()
+                        .filter(|e| !e.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false))
+                        .map(|e| {
+                            json!({
+                                "sessionId": e.get("sessionId").and_then(|v| v.as_str()).unwrap_or(""),
+                                "title": e.get("firstPrompt").and_then(|v| v.as_str()).unwrap_or(""),
+                                "modified": e.get("modified").and_then(|v| v.as_str()).unwrap_or(""),
+                                "messageCount": e.get("messageCount").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "gitBranch": e.get("gitBranch").and_then(|v| v.as_str()).unwrap_or(""),
+                            })
+                        })
+                        .collect();
 
-    let data: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse tabs file: {}", e))?;
+                    eprintln!("📂 Loaded {} sessions from sessions-index.json", sessions.len());
+                    return Ok(json!({ "sessions": sessions }));
+                }
+            }
+        }
+    }
 
-    eprintln!("📂 Tabs loaded from {:?}", tabs_path);
-    Ok(Some(data))
+    // Fallback: 掃描 .jsonl 檔案
+    let mut sessions: Vec<Value> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&project_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    let modified = entry.metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis().to_string())
+                        .unwrap_or_default();
+
+                    // 讀取檔案第一行取得 firstPrompt
+                    let title = fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|content| {
+                            content.lines()
+                                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                                .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("user"))
+                                .and_then(|v| {
+                                    v.get("message")
+                                        .and_then(|m| m.get("content"))
+                                        .and_then(|c| {
+                                            if let Some(s) = c.as_str() {
+                                                Some(s.to_string())
+                                            } else if let Some(arr) = c.as_array() {
+                                                arr.iter()
+                                                    .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("text"))
+                                                    .and_then(|item| item.get("text").and_then(|t| t.as_str()))
+                                                    .map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                })
+                        })
+                        .unwrap_or_default();
+
+                    sessions.push(json!({
+                        "sessionId": stem,
+                        "title": title,
+                        "modified": modified,
+                        "messageCount": 0,
+                        "gitBranch": "",
+                    }));
+                }
+            }
+        }
+    }
+
+    // 依 modified 排序（最新的在前）
+    sessions.sort_by(|a, b| {
+        let a_mod = a.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+        let b_mod = b.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+        b_mod.cmp(a_mod)
+    });
+
+    eprintln!("📂 Loaded {} sessions from .jsonl scan", sessions.len());
+    Ok(json!({ "sessions": sessions }))
 }
 
 // ============================================================================
@@ -1587,8 +1663,7 @@ pub fn run() {
             scan_skills,
             list_sessions,
             load_session_history,
-            save_tabs,
-            load_tabs,
+            load_sessions,
             start_ide_server,
             get_ide_status,
             get_ide_context,
