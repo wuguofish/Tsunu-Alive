@@ -1195,6 +1195,8 @@ async function handleOpenHistory(sessionId_: string, summary: string | null) {
                 };
               }
               return { type: 'text' as const, content: item.content };
+            } else if (item.type === 'compact') {
+              return { type: 'compact' as const, summary: item.summary };
             } else {
               return {
                 type: 'tool' as const,
