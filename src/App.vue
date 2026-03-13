@@ -205,6 +205,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 // 是否正在等待回應
 const isLoading = ref(false);
 const isProcessAlive = ref(false);  // 互動模式：CLI process 是否存活
+const isIntentionalRespawn = ref(false);  // 主動 respawn 時為 true，避免 ProcessExited 誤報錯誤
 
 // Toast 通知狀態
 const toastMessage = ref('');
@@ -349,8 +350,25 @@ function toggleExtendedThinking() {
 
 // 互動模式：設定變更時標記 process 需要 respawn
 // 不立即中斷，等下次送訊息時 ensureProcess() 自然重新啟動
+const pendingRespawn = ref(false);  // loading 中切模式時排隊，等 Complete 後再 respawn
+
 async function markProcessForRespawn() {
   if (!isProcessAlive.value) return;
+
+  // loading 中：不立即殺 process，等 Complete 後再 respawn（與 VS Code 行為一致）
+  if (isLoading.value) {
+    console.log('⏳ Respawn queued (waiting for current response to complete)');
+    pendingRespawn.value = true;
+    return;
+  }
+
+  await doRespawn();
+}
+
+async function doRespawn() {
+  if (!isProcessAlive.value) return;
+  isIntentionalRespawn.value = true;
+  pendingRespawn.value = false;
   try {
     await invoke('interrupt_claude');
   } catch (error) {
@@ -700,6 +718,17 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
 function handleClaudeEvent(event: ClaudeEvent) {
   console.log('Claude event:', event.event_type, event);
 
+  // ProcessExited：只有 process 還被認為存活時才算「意外退出」
+  // 以下情況直接忽略（不顯示錯誤）：
+  //   1. isIntentionalRespawn: markProcessForRespawn() 主動殺的
+  //   2. !isProcessAlive: HMR reload / app 重啟後 ref 重新初始化為 false
+  if (event.event_type === 'ProcessExited' && (isIntentionalRespawn.value || !isProcessAlive.value)) {
+    console.log('ℹ️ ProcessExited ignored (intentional or already dead)');
+    isIntentionalRespawn.value = false;
+    isProcessAlive.value = false;
+    return;
+  }
+
   // 特殊處理 AskUserQuestion 工具
   if (event.event_type === 'ToolUse' && event.tool_name === 'AskUserQuestion') {
     console.log('🤔 AskUserQuestion detected:', event.input);
@@ -775,6 +804,12 @@ function handleClaudeEvent(event: ClaudeEvent) {
   // Complete 事件時檢查是否有 <memory-update> 標籤（自動記憶提取）
   if (event.event_type === 'Complete') {
     extractAndSaveMemories();
+
+    // 如果有排隊的 respawn（loading 中切了模式），現在執行
+    if (pendingRespawn.value) {
+      console.log('🔄 Executing queued respawn after Complete');
+      doRespawn();
+    }
   }
 }
 
@@ -1066,6 +1101,9 @@ interface HistoryMessage {
 async function handleOpenHistory(sessionId_: string, summary: string | null) {
   // 先保存當前標籤頁狀態
   saveCurrentTabState();
+
+  // 互動模式：中斷舊 process（切換 session 需要用新 session_id 重新啟動）
+  markProcessForRespawn();
 
   // 在新標籤頁中開啟歷史對話
   const newTab = tabManager.openFromHistory(sessionId_, summary);
@@ -2954,8 +2992,8 @@ async function interruptRequest() {
         <!-- 動態載入的 Slash Commands -->
         <div class="slash-section" v-if="filteredSkills.length > 0">
           <div
-            v-for="skill in filteredSkills"
-            :key="skill.name"
+            v-for="(skill, index) in filteredSkills"
+            :key="`${skill.name}-${index}`"
             class="slash-item"
             @click="executeSlashCommand('/' + skill.name)"
           >
