@@ -280,7 +280,7 @@ pub async fn start_claude(
     working_dir: Option<String>,
     session_id: Option<String>,
     permission_mode: Option<String>,
-    extended_thinking: Option<bool>,
+    thinking_mode: Option<String>,
 ) -> Result<(), String> {
     // 先中斷舊的 process（如果有的話）
     {
@@ -321,9 +321,11 @@ pub async fn start_claude(
         }
     }
 
-    // Extended thinking
-    if extended_thinking.unwrap_or(false) {
-        cmd.arg("--thinking");
+    // Thinking 模式（adaptive / enabled）— off 時不傳參數
+    if let Some(ref mode) = thinking_mode {
+        if mode != "off" {
+            cmd.arg("--thinking").arg(mode);
+        }
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
@@ -964,6 +966,14 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "result" => {
+            eprintln!("📋 Result event JSON keys: {:?}", json.keys().collect::<Vec<_>>());
+            if let Some(mu) = json.get("modelUsage") {
+                eprintln!("📋 modelUsage: {}", mu);
+            } else {
+                eprintln!("📋 modelUsage: MISSING");
+            }
+            eprintln!("📋 last_turn tokens: in={}, out={}", self.last_turn_input_tokens, self.last_turn_output_tokens);
+
             let result = json.get("result")
                 .and_then(|r| r.as_str())
                 .unwrap_or("")

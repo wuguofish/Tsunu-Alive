@@ -32,12 +32,12 @@ async fn start_claude(
     working_dir: Option<String>,
     session_id: Option<String>,
     permission_mode: Option<String>,
-    extended_thinking: Option<bool>,
+    thinking_mode: Option<String>,
 ) -> Result<(), String> {
-    eprintln!("🚀 start_claude called: working_dir={:?}, session_id={:?}, permission_mode={:?}, extended_thinking={:?}",
-        working_dir, session_id, permission_mode, extended_thinking);
+    eprintln!("🚀 start_claude called: working_dir={:?}, session_id={:?}, permission_mode={:?}, thinking_mode={:?}",
+        working_dir, session_id, permission_mode, thinking_mode);
     let process = state.claude_process.clone();
-    claude::start_claude(app, process, working_dir, session_id, permission_mode, extended_thinking).await
+    claude::start_claude(app, process, working_dir, session_id, permission_mode, thinking_mode).await
 }
 
 /// 發送訊息給 Claude（互動模式）

@@ -337,13 +337,16 @@ watch(editMode, async (newMode) => {
   markProcessForRespawn();
 }, { immediate: true });
 
-// Extended Thinking 模式
-const extendedThinking = ref(false);
+// Extended Thinking 模式：'off' | 'adaptive' | 'enabled'
+type ThinkingMode = 'off' | 'adaptive' | 'enabled';
+const thinkingMode = ref<ThinkingMode>('adaptive');
+const thinkingModeOrder: ThinkingMode[] = ['off', 'adaptive', 'enabled'];
 
-// 切換 Extended Thinking
-function toggleExtendedThinking() {
-  extendedThinking.value = !extendedThinking.value;
-  console.log('💭 Extended Thinking:', extendedThinking.value ? 'ON' : 'OFF');
+// 切換 Thinking 模式（三段循環：Off → Adaptive → Enabled → Off）
+function toggleThinkingMode() {
+  const currentIndex = thinkingModeOrder.indexOf(thinkingMode.value);
+  thinkingMode.value = thinkingModeOrder[(currentIndex + 1) % 3];
+  console.log('💭 Thinking Mode:', thinkingMode.value);
   // 互動模式：標記 process 需要 respawn
   markProcessForRespawn();
 }
@@ -1019,7 +1022,7 @@ function handleGlobalKeydown(e: KeyboardEvent) {
 // === SessionSelector 事件處理器 ===
 
 // 切換標籤頁
-function handleSwitchTab(tabId: string) {
+async function handleSwitchTab(tabId: string) {
   // 先保存當前標籤頁的狀態
   saveCurrentTabState();
 
@@ -1028,6 +1031,22 @@ function handleSwitchTab(tabId: string) {
 
   // 恢復新標籤頁的狀態
   restoreTabState();
+
+  // 互動模式：切 tab = 切 session，需要殺掉舊 process
+  // 不用 markProcessForRespawn 避免 HMR 後 isProcessAlive=false 導致跳過
+  if (isLoading.value) {
+    // loading 中：排隊等 Complete 後再 respawn
+    console.log('⏳ Tab switch respawn queued (waiting for current response)');
+    pendingRespawn.value = true;
+    return;
+  }
+
+  // 直接殺掉舊 process（不管 isProcessAlive 狀態）
+  isIntentionalRespawn.value = true;
+  try {
+    await invoke('interrupt_claude');
+  } catch (_) { /* process 可能已經不在了 */ }
+  isProcessAlive.value = false;
 }
 
 // 關閉標籤頁
@@ -1351,7 +1370,7 @@ async function ensureProcess(): Promise<void> {
     workingDir: workingDir.value,
     sessionId: sessionId.value || null,
     permissionMode: permissionMode,
-    extendedThinking: extendedThinking.value || null,
+    thinkingMode: thinkingMode.value === 'off' ? null : thinkingMode.value,
   });
 
   isProcessAlive.value = true;
@@ -2904,12 +2923,12 @@ async function interruptRequest() {
           </button>
           <button
             class="status-btn thinking-toggle"
-            :class="{ active: extendedThinking }"
-            @click="toggleExtendedThinking"
-            title="Extended Thinking"
+            :class="{ active: thinkingMode !== 'off' }"
+            @click="toggleThinkingMode"
+            :title="`Thinking: ${thinkingMode === 'off' ? 'Off' : thinkingMode === 'adaptive' ? 'Adaptive（自動判斷）' : 'Enabled（總是思考）'}`"
           >
             <span class="thinking-icon">💭</span>
-            <span class="thinking-label">{{ extendedThinking ? 'Thinking ON' : 'Thinking' }}</span>
+            <span class="thinking-label">{{ thinkingMode === 'off' ? 'Thinking' : thinkingMode === 'adaptive' ? 'Adaptive' : 'Enabled' }}</span>
           </button>          
           <button
             class="status-btn ide-status"
