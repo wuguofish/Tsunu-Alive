@@ -1045,11 +1045,15 @@ function handleCloseTab(tabId: string) {
 }
 
 // 開始新對話（清除當前標籤頁）
-function handleNewConversation() {
+async function handleNewConversation() {
   tabManager.clearCurrentTab();
 
-  // 互動模式：中斷舊 process（新對話需要新 session）
-  markProcessForRespawn();
+  // 新對話一定要殺掉舊 process（不管 isProcessAlive 狀態，確保不會用舊 session）
+  isIntentionalRespawn.value = true;
+  try {
+    await invoke('interrupt_claude');
+  } catch (_) { /* process 可能已經不在了 */ }
+  isProcessAlive.value = false;
 
   // 同步到 App.vue 狀態
   messages.value = [
