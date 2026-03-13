@@ -1134,6 +1134,7 @@ interface HistoryMessage {
   role: string;
   items: Array<
     | { type: 'text'; content: string }
+    | { type: 'compact'; summary: string }
     | { type: 'tool'; tool: {
         id: string;
         name: string;
