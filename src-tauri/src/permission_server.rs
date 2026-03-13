@@ -173,6 +173,11 @@ const AUTO_ALLOW_TOOLS: &[&str] = &[
     "WebSearch",
     "WebFetch",
 
+    // 排程管理工具（建立、刪除、列出定時任務）
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+
     // Plan 模式相關（進入 Plan 模式不需要確認）
     "EnterPlanMode",
 ];
@@ -485,8 +490,8 @@ mod tests {
     fn test_auto_allow_tools_count_matches_frontend() {
         // 這個測試確保前後端的 AUTO_ALLOW_TOOLS 數量一致
         // 如果這個測試失敗，需要檢查 src/constants/autoAllowTools.ts
-        // 目前預期：11 個工具
-        assert_eq!(AUTO_ALLOW_TOOLS.len(), 11);
+        // 目前預期：14 個工具
+        assert_eq!(AUTO_ALLOW_TOOLS.len(), 14);
     }
 
     #[test]

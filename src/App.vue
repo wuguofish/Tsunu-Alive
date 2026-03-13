@@ -204,6 +204,8 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 
 // 是否正在等待回應
 const isLoading = ref(false);
+const isProcessAlive = ref(false);  // 互動模式：CLI process 是否存活
+const isIntentionalRespawn = ref(false);  // 主動 respawn 時為 true，避免 ProcessExited 誤報錯誤
 
 // Toast 通知狀態
 const toastMessage = ref('');
@@ -323,7 +325,7 @@ function cycleEditMode() {
   editMode.value = modes[(currentIndex + 1) % modes.length];
 }
 
-// editMode 變更時同步到後端 permission_server
+// editMode 變更時同步到後端 permission_server + 標記需要 respawn
 // 這樣 server 才能根據模式自動允許對應的工具
 watch(editMode, async (newMode) => {
   try {
@@ -331,15 +333,51 @@ watch(editMode, async (newMode) => {
   } catch (error) {
     console.error('Failed to sync edit mode to backend:', error);
   }
+  // 互動模式：標記 process 需要 respawn（下次 ensureProcess 時重新啟動）
+  markProcessForRespawn();
 }, { immediate: true });
 
-// Extended Thinking 模式
-const extendedThinking = ref(false);
+// Extended Thinking 模式：'off' | 'adaptive' | 'enabled'
+type ThinkingMode = 'off' | 'adaptive' | 'enabled';
+const thinkingMode = ref<ThinkingMode>('adaptive');
+const thinkingModeOrder: ThinkingMode[] = ['off', 'adaptive', 'enabled'];
 
-// 切換 Extended Thinking
-function toggleExtendedThinking() {
-  extendedThinking.value = !extendedThinking.value;
-  console.log('💭 Extended Thinking:', extendedThinking.value ? 'ON' : 'OFF');
+// 切換 Thinking 模式（三段循環：Off → Adaptive → Enabled → Off）
+function toggleThinkingMode() {
+  const currentIndex = thinkingModeOrder.indexOf(thinkingMode.value);
+  thinkingMode.value = thinkingModeOrder[(currentIndex + 1) % 3];
+  console.log('💭 Thinking Mode:', thinkingMode.value);
+  // 互動模式：標記 process 需要 respawn
+  markProcessForRespawn();
+}
+
+// 互動模式：設定變更時標記 process 需要 respawn
+// 不立即中斷，等下次送訊息時 ensureProcess() 自然重新啟動
+const pendingRespawn = ref(false);  // loading 中切模式時排隊，等 Complete 後再 respawn
+
+async function markProcessForRespawn() {
+  if (!isProcessAlive.value) return;
+
+  // loading 中：不立即殺 process，等 Complete 後再 respawn（與 VS Code 行為一致）
+  if (isLoading.value) {
+    console.log('⏳ Respawn queued (waiting for current response to complete)');
+    pendingRespawn.value = true;
+    return;
+  }
+
+  await doRespawn();
+}
+
+async function doRespawn() {
+  if (!isProcessAlive.value) return;
+  isIntentionalRespawn.value = true;
+  pendingRespawn.value = false;
+  try {
+    await invoke('interrupt_claude');
+  } catch (error) {
+    console.error('Failed to interrupt Claude for respawn:', error);
+  }
+  isProcessAlive.value = false;
 }
 
 // 工作目錄
@@ -364,13 +402,20 @@ async function selectWorkingDir() {
     });
 
     if (selected && typeof selected === 'string') {
-      // 開始切換：顯示 loading 狀態
+      // 更新工作目錄
+      workingDir.value = selected;
+
+      // 直接殺掉舊 process（不用 markProcessForRespawn，因為接下來會設 isLoading）
+      isIntentionalRespawn.value = true;
+      try {
+        await invoke('interrupt_claude');
+      } catch (_) { /* process 可能已經不在了 */ }
+      isProcessAlive.value = false;
+
+      // 顯示切換中狀態
       isLoading.value = true;
       busyStatus.value = '切換專案中...';
       avatarState.value = 'working';
-
-      // 更新工作目錄
-      workingDir.value = selected;
 
       // 清除當前 session 狀態
       sessionId.value = null;
@@ -402,12 +447,21 @@ async function selectWorkingDir() {
       if (activeTab?.sessionId) {
         sessionId.value = activeTab.sessionId;
         await loadTabHistory(activeTab.sessionId);
+        activeTab._historyLoaded = true;
+        activeTab.messages = [...messages.value];
       }
 
       // 切換完成：恢復 idle 狀態
       isLoading.value = false;
       busyStatus.value = '';
       avatarState.value = 'idle';
+
+      // 提早啟動新目錄的 CLI process（取得 init 事件 + plugins 列表）
+      try {
+        await ensureProcess();
+      } catch (e) {
+        console.warn('Failed to pre-launch CLI for new directory:', e);
+      }
     }
   } catch (error) {
     console.error('Failed to select directory:', error);
@@ -540,6 +594,9 @@ interface Question {
 interface PendingQuestion {
   toolId: string;
   questions: Question[];
+  // 互動模式：control_request 的資訊，用於透過 control_response 回傳答案
+  _controlRequestId?: string;
+  _cliToolUseId?: string;
 }
 
 // 待回答的問題（AskUserQuestion 工具）
@@ -604,6 +661,7 @@ function getCurrentAppState(): AppState {
     prevInputTokens: prevInputTokens.value,
     lastPrompt: lastPrompt.value,
     availableSkills: availableSkills.value,
+    isProcessAlive: isProcessAlive.value,
   };
 }
 
@@ -623,9 +681,17 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
   if (stateUpdates.busyStatus !== undefined) busyStatus.value = stateUpdates.busyStatus;
   if (stateUpdates.isLoading !== undefined) {
     isLoading.value = stateUpdates.isLoading;
-    // 注意：排隊訊息的自動送出已移到 sendMessageCore 的 invoke 完成後，
-    // 避免在第一個 CLI 程序尚未結束時就啟動第二個，造成 mutex 競爭
+    // 互動模式：Complete 事件時處理排隊訊息
+    if (!stateUpdates.isLoading && pendingMessage.value) {
+      const queued = pendingMessage.value;
+      pendingMessage.value = null;
+      nextTick().then(() => {
+        userInput.value = queued;
+        sendMessage();
+      });
+    }
   }
+  if (stateUpdates.isProcessAlive !== undefined) isProcessAlive.value = stateUpdates.isProcessAlive;
   if (stateUpdates.contextUsage !== undefined) contextUsage.value = stateUpdates.contextUsage;
   if (stateUpdates.contextInfo !== undefined) contextInfo.value = stateUpdates.contextInfo;
   if (stateUpdates.prevInputTokens !== undefined) prevInputTokens.value = stateUpdates.prevInputTokens;
@@ -667,6 +733,17 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
 // 處理 Claude 事件（使用 claudeEventHandler.ts 的統一邏輯）
 function handleClaudeEvent(event: ClaudeEvent) {
   console.log('Claude event:', event.event_type, event);
+
+  // ProcessExited：只有 process 還被認為存活時才算「意外退出」
+  // 以下情況直接忽略（不顯示錯誤）：
+  //   1. isIntentionalRespawn: markProcessForRespawn() 主動殺的
+  //   2. !isProcessAlive: HMR reload / app 重啟後 ref 重新初始化為 false
+  if (event.event_type === 'ProcessExited' && (isIntentionalRespawn.value || !isProcessAlive.value)) {
+    console.log('ℹ️ ProcessExited ignored (intentional or already dead)');
+    isIntentionalRespawn.value = false;
+    isProcessAlive.value = false;
+    return;
+  }
 
   // 特殊處理 AskUserQuestion 工具
   if (event.event_type === 'ToolUse' && event.tool_name === 'AskUserQuestion') {
@@ -743,6 +820,12 @@ function handleClaudeEvent(event: ClaudeEvent) {
   // Complete 事件時檢查是否有 <memory-update> 標籤（自動記憶提取）
   if (event.event_type === 'Complete') {
     extractAndSaveMemories();
+
+    // 如果有排隊的 respawn（loading 中切了模式），現在執行
+    if (pendingRespawn.value) {
+      console.log('🔄 Executing queued respawn after Complete');
+      doRespawn();
+    }
   }
 }
 
@@ -816,6 +899,7 @@ interface PermissionRequestEvent {
   tool_input: Record<string, unknown>;
   tool_use_id: string;
   session_id?: string;
+  cli_tool_use_id?: string;
 }
 
 // ExitPlanMode 專用事件類型
@@ -831,18 +915,38 @@ async function setupEventListeners() {
     handleClaudeEvent(event.payload);
   });
 
-  // 監聽 Permission HTTP Server 發送的權限請求（Hook 機制）
+  // 監聽權限請求事件（互動模式的 control_request 或 Hook 機制）
   unlistenPermissionRequest = await listen<PermissionRequestEvent>('permission-request', (event) => {
-    console.log('🔔 Permission request from Hook:', event.payload);
-    const { tool_name, tool_input, tool_use_id, session_id } = event.payload;
+    console.log('🔔 Permission request:', event.payload);
+    const { tool_name, tool_input, tool_use_id, session_id, cli_tool_use_id } = event.payload;
 
-    // 設定待確認的權限，標記為來自 Hook
+    // AskUserQuestion：顯示問題對話框而非權限對話框
+    if (tool_name === 'AskUserQuestion') {
+      console.log('🤔 AskUserQuestion via control_request:', tool_input);
+      const input = tool_input as { questions?: Question[] };
+      if (input?.questions && Array.isArray(input.questions)) {
+        pendingQuestion.value = {
+          toolId: tool_use_id,
+          questions: input.questions,
+          // 暫存 control_request 資訊，用於透過 control_response 回傳答案
+          _controlRequestId: tool_use_id,
+          _cliToolUseId: cli_tool_use_id,
+        };
+        avatarState.value = 'waiting';
+        busyStatus.value = '等待回答...';
+        stopBusyTextAnimation();
+      }
+      return;
+    }
+
+    // 其他工具：設定待確認的權限
     pendingPermission.value = {
       toolName: tool_name,
       toolId: tool_use_id,
       input: tool_input,
       isFromHook: true,
       sessionId: session_id,
+      cliToolUseId: cli_tool_use_id,
     };
     avatarState.value = 'waiting';
     busyStatus.value = '等待確認...';
@@ -931,7 +1035,7 @@ function handleGlobalKeydown(e: KeyboardEvent) {
 // === SessionSelector 事件處理器 ===
 
 // 切換標籤頁
-function handleSwitchTab(tabId: string) {
+async function handleSwitchTab(tabId: string) {
   // 先保存當前標籤頁的狀態
   saveCurrentTabState();
 
@@ -940,6 +1044,38 @@ function handleSwitchTab(tabId: string) {
 
   // 恢復新標籤頁的狀態
   restoreTabState();
+
+  // 如果目標 tab 有 sessionId 但還沒載入過歷史，載入它
+  const targetTab = tabManager.activeTab.value;
+  if (targetTab?.sessionId && !targetTab._historyLoaded) {
+    await loadTabHistory(targetTab.sessionId);
+    // 同步載入結果到 tab 裡
+    targetTab.messages = [...messages.value];
+    targetTab._historyLoaded = true;
+  }
+
+  // 互動模式：切 tab = 切 session，需要殺掉舊 process
+  // 不用 markProcessForRespawn 避免 HMR 後 isProcessAlive=false 導致跳過
+  if (isLoading.value) {
+    // loading 中：排隊等 Complete 後再 respawn
+    console.log('⏳ Tab switch respawn queued (waiting for current response)');
+    pendingRespawn.value = true;
+    return;
+  }
+
+  // 直接殺掉舊 process（不管 isProcessAlive 狀態）
+  isIntentionalRespawn.value = true;
+  try {
+    await invoke('interrupt_claude');
+  } catch (_) { /* process 可能已經不在了 */ }
+  isProcessAlive.value = false;
+
+  // 啟動新 process（帶目標 tab 的 sessionId）
+  try {
+    await ensureProcess();
+  } catch (e) {
+    console.warn('Failed to start process after tab switch:', e);
+  }
 }
 
 // 關閉標籤頁
@@ -957,8 +1093,15 @@ function handleCloseTab(tabId: string) {
 }
 
 // 開始新對話（清除當前標籤頁）
-function handleNewConversation() {
+async function handleNewConversation() {
   tabManager.clearCurrentTab();
+
+  // 新對話一定要殺掉舊 process（不管 isProcessAlive 狀態，確保不會用舊 session）
+  isIntentionalRespawn.value = true;
+  try {
+    await invoke('interrupt_claude');
+  } catch (_) { /* process 可能已經不在了 */ }
+  isProcessAlive.value = false;
 
   // 同步到 App.vue 狀態
   messages.value = [
@@ -1010,6 +1153,9 @@ interface HistoryMessage {
 async function handleOpenHistory(sessionId_: string, summary: string | null) {
   // 先保存當前標籤頁狀態
   saveCurrentTabState();
+
+  // 互動模式：中斷舊 process（切換 session 需要用新 session_id 重新啟動）
+  markProcessForRespawn();
 
   // 在新標籤頁中開啟歷史對話
   const newTab = tabManager.openFromHistory(sessionId_, summary);
@@ -1152,6 +1298,8 @@ async function loadTabHistory(tabSessionId: string) {
               };
             }
             return { type: 'text' as const, content: item.content };
+          } else if (item.type === 'compact') {
+            return { type: 'compact' as const, summary: item.summary };
           } else {
             return {
               type: 'tool' as const,
@@ -1177,6 +1325,13 @@ async function loadTabHistory(tabSessionId: string) {
     }
   } catch (error) {
     console.error('Failed to load tab history:', error);
+    // Session 檔案不存在時清掉 sessionId，避免 ensureProcess 用無效 session 啟動
+    sessionId.value = null;
+    // 同時清掉 tab 裡的 sessionId
+    const activeTab = tabManager.activeTab.value;
+    if (activeTab) {
+      activeTab.sessionId = null;
+    }
   }
 }
 
@@ -1204,6 +1359,9 @@ onMounted(async () => {
     if (activeTab?.sessionId) {
       sessionId.value = activeTab.sessionId;
       await loadTabHistory(activeTab.sessionId);
+      activeTab._historyLoaded = true;
+      // 同步載入結果到 tab
+      activeTab.messages = [...messages.value];
     }
   } catch (error) {
     console.error('Failed to get working directory:', error);
@@ -1221,6 +1379,14 @@ onMounted(async () => {
     }
   } catch (e) {
     console.error('Failed to check setup status:', e);
+  }
+
+  // 提早啟動 CLI process，取得 init 事件（slash_commands / plugins 列表）
+  // 不等使用者送第一則訊息才啟動，與 VS Code 行為一致
+  try {
+    await ensureProcess();
+  } catch (e) {
+    console.warn('Failed to pre-launch CLI process:', e);
   }
 });
 
@@ -1242,8 +1408,26 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown);
 });
 
+// 確保 CLI process 已啟動（互動模式）
+// 如果 process 不存在或已退出，啟動新的 process
+async function ensureProcess(): Promise<void> {
+  if (isProcessAlive.value) return;
+
+  const permissionMode = editMode.value === 'default' ? null : editMode.value;
+
+  await invoke('start_claude', {
+    workingDir: workingDir.value,
+    sessionId: sessionId.value || null,
+    permissionMode: permissionMode,
+    thinkingMode: thinkingMode.value === 'off' ? null : thinkingMode.value,
+  });
+
+  isProcessAlive.value = true;
+}
+
 // 送出訊息（核心函數，支援 allowedTools）
-async function sendMessageCore(content: string, extraAllowedTools: string[] = []) {
+// 互動模式：先確保 process 存在，再透過 stdin 送訊息（非阻塞）
+async function sendMessageCore(content: string, _extraAllowedTools: string[] = []) {
   // 開始載入狀態
   isLoading.value = true;
   avatarState.value = 'thinking';
@@ -1252,28 +1436,16 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
   currentToolUses.value = [];  // 清空當前請求的工具追蹤（舊的已保存在 messages 中）
   deniedToolsThisRequest.value.clear();  // 清空這次請求累積的被拒絕工具
 
-  // 合併 session 白名單和額外的工具
-  const allAllowedTools = [
-    ...sessionAllowedTools.value,
-    ...extraAllowedTools
-  ];
-
-  // 權限模式直接傳給 CLI
-  // - default 不傳（CLI 預設行為，所有工具觸發 hook）
-  // - acceptEdits/bypassPermissions/plan 直接傳給 CLI
-  // permission_server 的 edit_mode 邏輯在 default/acceptEdits 模式下補充處理
-  const permissionMode = editMode.value === 'default' ? null : editMode.value;
-
   try {
-    // 呼叫 Rust 端送出訊息給 Claude CLI
-    await invoke('send_to_claude', {
-      prompt: content,
-      workingDir: workingDir.value,  // 使用當前選擇的專案目錄
-      allowedTools: allAllowedTools.length > 0 ? allAllowedTools : null,
-      permissionMode: permissionMode,
-      extendedThinking: extendedThinking.value || null,
-      resumeSessionId: sessionId.value || null,  // 傳遞當前 session ID 以恢復對話
+    // 確保 CLI process 已啟動
+    await ensureProcess();
+
+    // 透過 stdin 送訊息給長駐的 CLI process（非阻塞，立即返回）
+    await invoke('send_message', {
+      message: content,
     });
+    // 注意：不再 await CLI 完成，回應透過 claude-event 事件串流回來
+    // 排隊訊息的處理已移到 applyEventResult 的 Complete 事件中
   } catch (error) {
     console.error('Failed to send to Claude:', error);
     isLoading.value = false;
@@ -1285,18 +1457,6 @@ async function sendMessageCore(content: string, extraAllowedTools: string[] = []
       role: 'assistant',
       items: [{ type: 'text', content: `*皺眉* 連接 Claude 時發生錯誤：${error}` }]
     });
-  }
-
-  // CLI 程序已完全結束（invoke resolved），安全地送出排隊中的訊息
-  // 重要：必須在 invoke 完成後才送出，否則兩個 run_claude 會同時執行，
-  // 第二個 CLI 的 Init 事件需要取得 process mutex lock，
-  // 而第一個 run_claude 正持有 lock 等待 child exit → 造成 mutex 競爭
-  if (pendingMessage.value) {
-    const queued = pendingMessage.value;
-    pendingMessage.value = null;
-    await nextTick();
-    userInput.value = queued;
-    await sendMessage();
   }
 }
 
@@ -1336,6 +1496,11 @@ async function handleRememberCommand(content: string) {
 async function sendMessage() {
   const content = userInput.value.trim();
   if (!content) return;
+
+  // 關閉斜線選單（如果開著）
+  if (showSlashMenu.value) {
+    showSlashMenu.value = false;
+  }
 
   // Claude 正在工作時，將訊息排隊等待
   if (isLoading.value) {
@@ -1467,6 +1632,20 @@ function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
       closeMentionMenu();
+      return;
+    }
+  }
+
+  // 斜線選單開啟時，方向鍵選擇、Enter 確認
+  if (showSlashMenu.value) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      // 如果有過濾到的 skill，選擇第一個；否則直接送出
+      if (filteredSkills.value.length > 0) {
+        executeSlashCommand('/' + filteredSkills.value[0].name);
+      } else {
+        sendMessage();
+      }
       return;
     }
   }
@@ -2077,6 +2256,7 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
   const isFromHook = pendingPermission.value.isFromHook ?? false;
   const hookSessionId = pendingPermission.value.sessionId;
   const originalPrompt = pendingPermission.value.originalPrompt;
+  const cliToolUseId = pendingPermission.value.cliToolUseId;
 
   // 清除待確認的權限
   pendingPermission.value = null;
@@ -2093,11 +2273,12 @@ async function handlePermissionResponse(response: 'yes' | 'yes-all' | 'yes-alway
       : (response === 'custom' ? customMessage : undefined);
 
     try {
-      // 發送決策到 Permission Server
+      // 發送決策到 Permission Server / control_response
       await invoke('respond_to_permission', {
         toolUseId: toolId,
         behavior,
         message,
+        cliToolUseId,
       });
       console.log(`✅ Permission response sent: ${behavior}`);
 
@@ -2417,6 +2598,9 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
   if (!pendingQuestion.value) return;
 
   const toolId = pendingQuestion.value.toolId;
+  const controlRequestId = pendingQuestion.value._controlRequestId;
+  const cliToolUseId = pendingQuestion.value._cliToolUseId;
+  const originalQuestions = pendingQuestion.value.questions;
   const formattedAnswer = Object.entries(answers)
     .map(([q, a]) => `${q}: ${a}`)
     .join('\n');
@@ -2425,7 +2609,7 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
   const tool = currentToolUses.value.find(t => t.id === toolId);
   if (tool) {
     tool.result = formattedAnswer;
-    tool.userAnswered = true;  // 標記用戶已回答，防止 ToolResult 覆蓋
+    tool.userAnswered = true;
   }
 
   // 同時更新 messages 中的工具（遍歷所有訊息尋找）
@@ -2446,29 +2630,62 @@ async function handleQuestionSubmit(answers: Record<string, string>) {
   // 清除待回答的問題
   pendingQuestion.value = null;
 
-  // 將答案作為使用者訊息發送（讓 Claude 繼續）
+  // 互動模式：透過 control_response 回傳答案（updatedInput 帶用戶答案）
+  if (controlRequestId) {
+    // VS Code extension 格式：questions 保持原樣，answers 是獨立物件（key=問題文字, value=逗號分隔答案）
+    const updatedInput = {
+      questions: originalQuestions,
+      answers: answers,
+    };
+
+    console.log('📤 AskUserQuestion updatedInput:', updatedInput);
+
+    try {
+      await invoke('respond_to_permission', {
+        toolUseId: controlRequestId,
+        behavior: 'allow',
+        cliToolUseId: cliToolUseId,
+        updatedInput: updatedInput,
+      });
+      console.log('✅ AskUserQuestion answer sent via control_response');
+    } catch (err) {
+      console.error('❌ Failed to send AskUserQuestion answer:', err);
+    }
+
+    // 顯示用戶的回答在聊天視窗
+    const answerText = Object.entries(answers)
+      .map(([q, a]) => `${q}\n→ ${a}`)
+      .join('\n\n');
+    messages.value.push({
+      role: 'user',
+      items: [{ type: 'text', content: answerText }]
+    });
+    await scrollToBottom();
+    return;
+  }
+
+  // Fallback：將答案作為使用者訊息發送
   const answerText = Object.entries(answers)
     .map(([q, a]) => `${q}\n→ ${a}`)
     .join('\n\n');
 
-  // 發送答案
   messages.value.push({
     role: 'user',
     items: [{ type: 'text', content: answerText }]
   });
   await scrollToBottom();
-  // 注意：不更新 lastPrompt，因為這是對工具的回應，不是新的用戶請求
-  // 這樣在 PermissionDenied fallback 模式下重新執行時，會使用原始的用戶請求
   await sendMessageCore(answerText);
 }
 
 // 取消 AskUserQuestion
-function handleQuestionCancel() {
+async function handleQuestionCancel() {
   console.log('🔴 Question cancelled');
 
   if (!pendingQuestion.value) return;
 
   const toolId = pendingQuestion.value.toolId;
+  const controlRequestId = pendingQuestion.value._controlRequestId;
+  const cliToolUseId = pendingQuestion.value._cliToolUseId;
 
   // 更新工具使用記錄為取消
   const tool = currentToolUses.value.find(t => t.id === toolId);
@@ -2492,6 +2709,21 @@ function handleQuestionCancel() {
 
   // 清除待回答的問題
   pendingQuestion.value = null;
+
+  // 互動模式：透過 control_response 回傳拒絕
+  if (controlRequestId) {
+    try {
+      await invoke('respond_to_permission', {
+        toolUseId: controlRequestId,
+        behavior: 'deny',
+        message: '使用者取消了問題',
+        cliToolUseId: cliToolUseId,
+      });
+    } catch (err) {
+      console.error('❌ Failed to send cancel:', err);
+    }
+  }
+
   avatarState.value = 'idle';
   isLoading.value = false;
   stopBusyTextAnimation();
@@ -2518,8 +2750,7 @@ async function interruptRequest() {
   streamingText.value = '';
   currentToolUses.value = [];
 
-  // 注意：排隊訊息的自動送出由 sendMessageCore 的 invoke 完成後處理
-  // 中斷 → kill process → run_claude 返回 → invoke resolve → 自動送出排隊訊息
+  // 互動模式：排隊訊息由 applyEventResult 在 Complete 事件時自動送出
 }
 </script>
 
@@ -2760,12 +2991,12 @@ async function interruptRequest() {
           </button>
           <button
             class="status-btn thinking-toggle"
-            :class="{ active: extendedThinking }"
-            @click="toggleExtendedThinking"
-            title="Extended Thinking"
+            :class="{ active: thinkingMode !== 'off' }"
+            @click="toggleThinkingMode"
+            :title="`Thinking: ${thinkingMode === 'off' ? 'Off' : thinkingMode === 'adaptive' ? 'Adaptive（自動判斷）' : 'Enabled（總是思考）'}`"
           >
             <span class="thinking-icon">💭</span>
-            <span class="thinking-label">{{ extendedThinking ? 'Thinking ON' : 'Thinking' }}</span>
+            <span class="thinking-label">{{ thinkingMode === 'off' ? 'Thinking' : thinkingMode === 'adaptive' ? 'Adaptive' : 'Enabled' }}</span>
           </button>          
           <button
             class="status-btn ide-status"
@@ -2800,7 +3031,7 @@ async function interruptRequest() {
             <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
             <span v-if="contextInfo?.inputTokensDelta !== undefined" class="usage-delta"
               :class="{ 'delta-warning': (contextInfo?.inputTokensDelta ?? 0) > 5000 }"
-            >({{ contextInfo.inputTokensDelta >= 0 ? '+' : '' }}{{ Math.round((contextInfo.inputTokensDelta ?? 0) / 1000) }}k)</span>
+            >({{ contextInfo.inputTokensDelta >= 0 ? '+' : '' }}{{ Math.abs(contextInfo.inputTokensDelta ?? 0) >= 1000 ? Math.round((contextInfo.inputTokensDelta ?? 0) / 1000) + 'k' : contextInfo.inputTokensDelta }})</span>
           </button>
         </div>
 
@@ -2852,8 +3083,8 @@ async function interruptRequest() {
         <!-- 動態載入的 Slash Commands -->
         <div class="slash-section" v-if="filteredSkills.length > 0">
           <div
-            v-for="skill in filteredSkills"
-            :key="skill.name"
+            v-for="(skill, index) in filteredSkills"
+            :key="`${skill.name}-${index}`"
             class="slash-item"
             @click="executeSlashCommand('/' + skill.name)"
           >
