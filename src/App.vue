@@ -402,16 +402,20 @@ async function selectWorkingDir() {
     });
 
     if (selected && typeof selected === 'string') {
-      // 開始切換：顯示 loading 狀態
-      isLoading.value = true;
-      busyStatus.value = '切換專案中...';
-      avatarState.value = 'working';
-
       // 更新工作目錄
       workingDir.value = selected;
 
-      // 互動模式：中斷舊 process（新目錄需要新 process）
-      await markProcessForRespawn();
+      // 直接殺掉舊 process（不用 markProcessForRespawn，因為接下來會設 isLoading）
+      isIntentionalRespawn.value = true;
+      try {
+        await invoke('interrupt_claude');
+      } catch (_) { /* process 可能已經不在了 */ }
+      isProcessAlive.value = false;
+
+      // 顯示切換中狀態
+      isLoading.value = true;
+      busyStatus.value = '切換專案中...';
+      avatarState.value = 'working';
 
       // 清除當前 session 狀態
       sessionId.value = null;
@@ -449,6 +453,13 @@ async function selectWorkingDir() {
       isLoading.value = false;
       busyStatus.value = '';
       avatarState.value = 'idle';
+
+      // 提早啟動新目錄的 CLI process（取得 init 事件 + plugins 列表）
+      try {
+        await ensureProcess();
+      } catch (e) {
+        console.warn('Failed to pre-launch CLI for new directory:', e);
+      }
     }
   } catch (error) {
     console.error('Failed to select directory:', error);
@@ -1294,6 +1305,14 @@ async function loadTabHistory(tabSessionId: string) {
     }
   } catch (error) {
     console.error('Failed to load tab history:', error);
+    // Session 檔案不存在時清掉 sessionId，避免 ensureProcess 用無效 session 啟動
+    sessionId.value = null;
+    // 同時清掉 tab 裡的 sessionId，下次啟動不會再嘗試載入
+    const activeTab = tabManager.activeTab.value;
+    if (activeTab) {
+      activeTab.sessionId = undefined;
+      tabManager.saveTabs();
+    }
   }
 }
 
@@ -1338,6 +1357,14 @@ onMounted(async () => {
     }
   } catch (e) {
     console.error('Failed to check setup status:', e);
+  }
+
+  // 提早啟動 CLI process，取得 init 事件（slash_commands / plugins 列表）
+  // 不等使用者送第一則訊息才啟動，與 VS Code 行為一致
+  try {
+    await ensureProcess();
+  } catch (e) {
+    console.warn('Failed to pre-launch CLI process:', e);
   }
 });
 
@@ -1447,6 +1474,11 @@ async function handleRememberCommand(content: string) {
 async function sendMessage() {
   const content = userInput.value.trim();
   if (!content) return;
+
+  // 關閉斜線選單（如果開著）
+  if (showSlashMenu.value) {
+    showSlashMenu.value = false;
+  }
 
   // Claude 正在工作時，將訊息排隊等待
   if (isLoading.value) {
@@ -1578,6 +1610,20 @@ function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
       closeMentionMenu();
+      return;
+    }
+  }
+
+  // 斜線選單開啟時，方向鍵選擇、Enter 確認
+  if (showSlashMenu.value) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      // 如果有過濾到的 skill，選擇第一個；否則直接送出
+      if (filteredSkills.value.length > 0) {
+        executeSlashCommand('/' + filteredSkills.value[0].name);
+      } else {
+        sendMessage();
+      }
       return;
     }
   }
@@ -2963,7 +3009,7 @@ async function interruptRequest() {
             <span class="usage-text">{{ contextUsage !== null ? contextUsage + '% used' : '—' }}</span>
             <span v-if="contextInfo?.inputTokensDelta !== undefined" class="usage-delta"
               :class="{ 'delta-warning': (contextInfo?.inputTokensDelta ?? 0) > 5000 }"
-            >({{ contextInfo.inputTokensDelta >= 0 ? '+' : '' }}{{ Math.round((contextInfo.inputTokensDelta ?? 0) / 1000) }}k)</span>
+            >({{ contextInfo.inputTokensDelta >= 0 ? '+' : '' }}{{ Math.abs(contextInfo.inputTokensDelta ?? 0) >= 1000 ? Math.round((contextInfo.inputTokensDelta ?? 0) / 1000) + 'k' : contextInfo.inputTokensDelta }})</span>
           </button>
         </div>
 

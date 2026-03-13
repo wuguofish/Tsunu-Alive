@@ -427,7 +427,9 @@ pub async fn start_claude(
                     let events = parser.parse(&json);
                     for evt in events {
                         // 如果是 Init 事件，儲存 session_id
-                        if let ClaudeEvent::Init { ref session_id, .. } = evt {
+                        if let ClaudeEvent::Init { ref session_id, ref slash_commands, .. } = evt {
+                            eprintln!("📡 Emitting Init event: session={}, skills={:?}",
+                                session_id, slash_commands.as_ref().map(|s| s.len()));
                             let mut proc = process_clone.lock().await;
                             proc.session_id = Some(session_id.clone());
                         }
@@ -757,9 +759,12 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 // assistant 事件的 message.usage 包含該次 turn 的 input/output tokens
                 // input_tokens 代表送入的完整 context 大小，是 context window 使用量的最佳近似值
                 if let Some(usage) = message.get("usage") {
-                    if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                        self.last_turn_input_tokens = input;
-                    }
+                    eprintln!("📋 assistant message.usage: {}", usage);
+                    // input_tokens 只是 non-cached 部分，要加上 cache tokens 才是真正的 context 大小
+                    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let cache_create = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let cache_read = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    self.last_turn_input_tokens = input + cache_create + cache_read;
                     if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                         self.last_turn_output_tokens = output;
                     }
@@ -966,7 +971,7 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "result" => {
-            eprintln!("📋 Result event JSON keys: {:?}", json.keys().collect::<Vec<_>>());
+            eprintln!("📋 Result event JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
             if let Some(mu) = json.get("modelUsage") {
                 eprintln!("📋 modelUsage: {}", mu);
             } else {
@@ -994,20 +999,15 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 m.values().next().and_then(|v| v.get("contextWindow")).and_then(|c| c.as_u64())
             });
 
-            // 用最近一次 turn 的 token 數計算 context window 使用量
+            // 用最近一次 assistant turn 的 token 數計算 context window 使用量
+            // last_turn_input_tokens 已包含 cache tokens（在 assistant 事件處理時加總）
             let last_turn_tokens = self.last_turn_input_tokens + self.last_turn_output_tokens;
             let (total_tokens_in_conversation, context_window_used_percent) = if let Some(max) = context_window_max {
                 if last_turn_tokens > 0 {
                     let percent = (last_turn_tokens as f64 / max as f64) * 100.0;
                     (Some(last_turn_tokens), Some(percent))
                 } else {
-                    // 若沒有追蹤到 per-turn usage，用累積值作為 fallback
-                    let usage = json.get("usage");
-                    let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-                    let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-                    let total = input_tokens + output_tokens;
-                    let percent = (total as f64 / max as f64) * 100.0;
-                    (Some(total), Some(percent))
+                    (None, None)
                 }
             } else {
                 (if last_turn_tokens > 0 { Some(last_turn_tokens) } else { None }, None)
