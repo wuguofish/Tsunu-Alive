@@ -85,9 +85,19 @@ fn get_working_directory() -> Result<String, String> {
         return Ok(custom_dir.clone());
     }
 
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .map_err(|e| format!("Failed to get working directory: {}", e))
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("Failed to get working directory: {}", e))?;
+
+    // tauri dev 模式下 current_dir() 會是 src-tauri/，需要回到專案根目錄
+    let dir = if cwd.ends_with("src-tauri") {
+        let project_root = cwd.parent().unwrap_or(&cwd).to_path_buf();
+        // dev mode 使用 test/ 子目錄，避免與開發者自己的 Claude session 衝突
+        project_root.join("test")
+    } else {
+        cwd
+    };
+
+    Ok(dir.to_string_lossy().to_string())
 }
 
 /// 檔案項目（用於 @-mention 選單）
@@ -123,6 +133,8 @@ pub enum HistoryChatItem {
     Text { content: String },
     #[serde(rename = "tool")]
     Tool { tool: HistoryToolUse },
+    #[serde(rename = "compact")]
+    Compact { summary: String },
 }
 
 /// 工具使用記錄
@@ -343,57 +355,26 @@ fn scan_skills(working_dir: Option<String>) -> Result<Vec<SkillItem>, String> {
     Ok(all_skills)
 }
 
-/// 將專案路徑轉換為 Claude CLI 的目錄名稱格式
-/// 例如：d:\game\tsunu_alive → d--game-tsunu-alive
-/// 例如：C:\Users\ATone\.claude\skills\gget-analyzer → c--Users-ATone--claude-skills-gget-analyzer
-fn get_project_dir_name(working_dir: &str) -> String {
-    // 標準化路徑分隔符，把所有特殊字元替換成 - 或移除
-    let path = working_dir
-        .replace('\\', "/")
-        .replace(':', "")
-        .replace('_', "-")
-        .replace('.', "-");  // Claude CLI 也會把 . 替換成 -
-
-    // 分割路徑並重新組合
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
-    if parts.is_empty() {
-        return "unknown".to_string();
+/// 將工作目錄轉換為 Claude CLI 的 projects 目錄名
+/// 規則：非英數字元換成 `-`，長度 ≤ 200 直接用（與 VS Code 延伸套件一致）
+fn working_dir_to_project_dir_name(working_dir: &str) -> String {
+    let name: String = working_dir.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if name.len() <= 200 {
+        name
+    } else {
+        name[..200].to_string()
     }
-
-    // 第一個部分是磁碟機代號（如果有的話），用 -- 連接
-    // 其餘部分用 - 連接
-    let mut result = String::new();
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 {
-            result.push_str(&part.to_lowercase());
-            result.push_str("--");
-        } else {
-            if i > 1 {
-                result.push('-');
-            }
-            result.push_str(&part.to_lowercase());
-        }
-    }
-
-    result
 }
 
-/// 取得 Claude CLI 的 sessions 目錄
-fn get_claude_sessions_dir(working_dir: &str) -> Option<PathBuf> {
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let home = std::env::var_os(home_var)?;
-    let home_path = PathBuf::from(home);
-
-    // Claude CLI 的專案資料存放在 ~/.claude/projects/[project-dir-name]/
-    let project_dir_name = get_project_dir_name(working_dir);
-    let sessions_dir = home_path
-        .join(".claude")
-        .join("projects")
-        .join(&project_dir_name);
-
-    if sessions_dir.exists() {
-        Some(sessions_dir)
+/// 取得 Claude CLI 的專案目錄路徑
+fn get_claude_project_dir(working_dir: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir_name = working_dir_to_project_dir_name(working_dir);
+    let project_dir = home.join(".claude").join("projects").join(dir_name);
+    if project_dir.exists() {
+        Some(project_dir)
     } else {
         None
     }
@@ -402,7 +383,7 @@ fn get_claude_sessions_dir(working_dir: &str) -> Option<PathBuf> {
 /// 列出專案的歷史 sessions
 #[tauri::command]
 fn list_sessions(working_dir: String) -> Result<Vec<SessionItem>, String> {
-    let sessions_dir = match get_claude_sessions_dir(&working_dir) {
+    let sessions_dir = match get_claude_project_dir(&working_dir) {
         Some(dir) => dir,
         None => return Ok(Vec::new()), // 沒有 session 目錄，回傳空列表
     };
@@ -517,7 +498,7 @@ fn load_session_history(
     working_dir: String,
     session_id: String,
 ) -> Result<Vec<HistoryMessage>, String> {
-    let sessions_dir = match get_claude_sessions_dir(&working_dir) {
+    let sessions_dir = match get_claude_project_dir(&working_dir) {
         Some(dir) => dir,
         None => return Err("Session directory not found".to_string()),
     };
@@ -553,6 +534,28 @@ fn load_session_history(
                     if !msg.items.is_empty() {
                         messages.push(msg);
                     }
+                }
+
+                // 檢查是否是 Compact 摘要（jsonl 中用 isCompactSummary 標記）
+                let is_compact = json.get("isCompactSummary")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                if is_compact {
+                    let summary = json.get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    if !summary.is_empty() {
+                        // Compact 摘要顯示為 assistant 的 compact item
+                        messages.push(HistoryMessage {
+                            role: "assistant".to_string(),
+                            items: vec![HistoryChatItem::Compact { summary }],
+                        });
+                    }
+                    continue;
                 }
 
                 // 解析 user 訊息內容
@@ -908,120 +911,80 @@ async fn add_project_permission(
 // Tab Management Commands
 // ============================================================================
 
-/// 將工作目錄轉換為 Claude CLI 的 projects 目錄名
-/// 規則：非英數字元換成 `-`，長度 ≤ 200 直接用（與 VS Code 延伸套件一致）
-fn working_dir_to_project_dir_name(working_dir: &str) -> String {
-    let name: String = working_dir.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    if name.len() <= 200 {
-        name
-    } else {
-        // 太長時截斷（簡化版，不做 hash）
-        name[..200].to_string()
-    }
-}
-
-/// 取得 Claude CLI 的 sessions 目錄路徑
-fn get_claude_project_dir(working_dir: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let dir_name = working_dir_to_project_dir_name(working_dir);
-    Some(home.join(".claude").join("projects").join(dir_name))
-}
-
-/// 載入 session 列表（從 sessions-index.json 或 .jsonl 掃描）
+/// 載入 session 列表（直接掃描 .jsonl 檔案，用檔案修改時間排序）
 #[tauri::command]
 async fn load_sessions(working_dir: String) -> Result<Value, String> {
-    let project_dir = get_claude_project_dir(&working_dir)
-        .ok_or_else(|| "Cannot determine home directory".to_string())?;
+    let project_dir = match get_claude_project_dir(&working_dir) {
+        Some(dir) => dir,
+        None => return Ok(json!({ "sessions": [] })),
+    };
 
-    if !project_dir.exists() {
-        return Ok(json!({ "sessions": [] }));
-    }
-
-    // 優先讀 sessions-index.json
-    let index_path = project_dir.join("sessions-index.json");
-    if index_path.exists() {
-        if let Ok(content) = fs::read_to_string(&index_path) {
-            if let Ok(index) = serde_json::from_str::<Value>(&content) {
-                if let Some(entries) = index.get("entries").and_then(|e| e.as_array()) {
-                    let sessions: Vec<Value> = entries.iter()
-                        .filter(|e| !e.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false))
-                        .map(|e| {
-                            json!({
-                                "sessionId": e.get("sessionId").and_then(|v| v.as_str()).unwrap_or(""),
-                                "title": e.get("firstPrompt").and_then(|v| v.as_str()).unwrap_or(""),
-                                "modified": e.get("modified").and_then(|v| v.as_str()).unwrap_or(""),
-                                "messageCount": e.get("messageCount").and_then(|v| v.as_u64()).unwrap_or(0),
-                                "gitBranch": e.get("gitBranch").and_then(|v| v.as_str()).unwrap_or(""),
-                            })
-                        })
-                        .collect();
-
-                    eprintln!("📂 Loaded {} sessions from sessions-index.json", sessions.len());
-                    return Ok(json!({ "sessions": sessions }));
-                }
-            }
-        }
-    }
-
-    // Fallback: 掃描 .jsonl 檔案
     let mut sessions: Vec<Value> = Vec::new();
+
     if let Ok(entries) = fs::read_dir(&project_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let modified = entry.metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis().to_string())
-                        .unwrap_or_default();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
 
-                    // 讀取檔案第一行取得 firstPrompt
-                    let title = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|content| {
-                            content.lines()
-                                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                                .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("user"))
-                                .and_then(|v| {
-                                    v.get("message")
-                                        .and_then(|m| m.get("content"))
-                                        .and_then(|c| {
-                                            if let Some(s) = c.as_str() {
-                                                Some(s.to_string())
-                                            } else if let Some(arr) = c.as_array() {
-                                                arr.iter()
-                                                    .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("text"))
-                                                    .and_then(|item| item.get("text").and_then(|t| t.as_str()))
-                                                    .map(|s| s.to_string())
-                                            } else {
-                                                None
-                                            }
-                                        })
+            // 用檔案修改時間作為 modified（轉成 ISO 8601）
+            let modified = entry.metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    let dt: chrono::DateTime<chrono::Utc> = t.into();
+                    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                })
+                .unwrap_or_default();
+
+            // 讀取檔案前幾行取得 firstPrompt（避免讀整個大檔案）
+            let title = fs::File::open(&path)
+                .ok()
+                .and_then(|f| {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(f);
+                    reader.lines()
+                        .take(20) // 只讀前 20 行
+                        .filter_map(|line| line.ok())
+                        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+                        .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("user"))
+                        .and_then(|v| {
+                            v.get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| {
+                                    if let Some(s) = c.as_str() {
+                                        Some(s.to_string())
+                                    } else if let Some(arr) = c.as_array() {
+                                        arr.iter()
+                                            .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("text"))
+                                            .and_then(|item| item.get("text").and_then(|t| t.as_str()))
+                                            .map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    }
                                 })
                         })
-                        .unwrap_or_default();
+                })
+                .unwrap_or_default();
 
-                    sessions.push(json!({
-                        "sessionId": stem,
-                        "title": title,
-                        "modified": modified,
-                        "messageCount": 0,
-                        "gitBranch": "",
-                    }));
-                }
-            }
+            sessions.push(json!({
+                "sessionId": stem,
+                "title": title,
+                "modified": modified,
+            }));
         }
     }
 
-    // 依 modified 排序（最新的在前）
+    // 按 modified 降序排列，越新的越前面
     sessions.sort_by(|a, b| {
-        let a_mod = a.get("modified").and_then(|v| v.as_str()).unwrap_or("");
-        let b_mod = b.get("modified").and_then(|v| v.as_str()).unwrap_or("");
-        b_mod.cmp(a_mod)
+        let ma = a.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+        let mb = b.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+        mb.cmp(ma)
     });
 
     eprintln!("📂 Loaded {} sessions from .jsonl scan", sessions.len());

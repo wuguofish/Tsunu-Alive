@@ -148,12 +148,12 @@ export function handleInitEvent(
   event: ClaudeEvent,
   _state: AppState
 ): EventHandlerResult {
-  const stateUpdates: Partial<AppState> = {
-    busyStatus: 'Thinking...',
-  };
+  const stateUpdates: Partial<AppState> = {};
 
   if (event.session_id) {
     stateUpdates.sessionId = event.session_id;
+    // 只有帶 session_id 的 init 才表示真正開始對話
+    stateUpdates.busyStatus = 'Thinking...';
   }
   if (event.model) {
     stateUpdates.currentModel = event.model;

@@ -447,6 +447,8 @@ async function selectWorkingDir() {
       if (activeTab?.sessionId) {
         sessionId.value = activeTab.sessionId;
         await loadTabHistory(activeTab.sessionId);
+        activeTab._historyLoaded = true;
+        activeTab.messages = [...messages.value];
       }
 
       // 切換完成：恢復 idle 狀態
@@ -1043,6 +1045,15 @@ async function handleSwitchTab(tabId: string) {
   // 恢復新標籤頁的狀態
   restoreTabState();
 
+  // 如果目標 tab 有 sessionId 但還沒載入過歷史，載入它
+  const targetTab = tabManager.activeTab.value;
+  if (targetTab?.sessionId && !targetTab._historyLoaded) {
+    await loadTabHistory(targetTab.sessionId);
+    // 同步載入結果到 tab 裡
+    targetTab.messages = [...messages.value];
+    targetTab._historyLoaded = true;
+  }
+
   // 互動模式：切 tab = 切 session，需要殺掉舊 process
   // 不用 markProcessForRespawn 避免 HMR 後 isProcessAlive=false 導致跳過
   if (isLoading.value) {
@@ -1058,6 +1069,13 @@ async function handleSwitchTab(tabId: string) {
     await invoke('interrupt_claude');
   } catch (_) { /* process 可能已經不在了 */ }
   isProcessAlive.value = false;
+
+  // 啟動新 process（帶目標 tab 的 sessionId）
+  try {
+    await ensureProcess();
+  } catch (e) {
+    console.warn('Failed to start process after tab switch:', e);
+  }
 }
 
 // 關閉標籤頁
@@ -1280,6 +1298,8 @@ async function loadTabHistory(tabSessionId: string) {
               };
             }
             return { type: 'text' as const, content: item.content };
+          } else if (item.type === 'compact') {
+            return { type: 'compact' as const, summary: item.summary };
           } else {
             return {
               type: 'tool' as const,
@@ -1339,6 +1359,9 @@ onMounted(async () => {
     if (activeTab?.sessionId) {
       sessionId.value = activeTab.sessionId;
       await loadTabHistory(activeTab.sessionId);
+      activeTab._historyLoaded = true;
+      // 同步載入結果到 tab
+      activeTab.messages = [...messages.value];
     }
   } catch (error) {
     console.error('Failed to get working directory:', error);

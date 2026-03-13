@@ -10,13 +10,11 @@ import type {
   ContextInfo,
 } from '../utils/claudeEventHandler';
 
-/** Claude CLI session entry（從 sessions-index.json 或 .jsonl 掃描） */
+/** Claude CLI session entry（從 .jsonl 掃描） */
 export interface SessionEntry {
   sessionId: string;
   title: string;
   modified: string;
-  messageCount: number;
-  gitBranch: string;
 }
 
 /** 運行時完整狀態 */
@@ -36,6 +34,7 @@ export interface TabState {
   isLoading: boolean;
   pendingPermission: PendingPermission | null;
   avatarState: AvatarState;
+  _historyLoaded?: boolean;   // 標記是否已載入歷史訊息（避免重複載入）
 }
 
 /** 建立新標籤頁的預設狀態 */

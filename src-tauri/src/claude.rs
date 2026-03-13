@@ -374,7 +374,7 @@ pub async fn start_claude(
                 "agentProgressSummaries": serde_json::Value::Null
             }
         });
-        eprintln!("📤 initialize control_request: {}", serde_json::to_string_pretty(&init_msg).unwrap_or_default());
+        // 送出 initialize 訊息
         let mut proc = process.lock().await;
         if let Some(ref mut stdin) = proc.stdin_writer {
             let json_str = serde_json::to_string(&init_msg)
@@ -414,9 +414,37 @@ pub async fn start_claude(
                     if msg_type == "keep_alive" {
                         continue;
                     }
-                    // 忽略 control_response（CLI 回應我們的 control_request，例如 initialize）
+                    // control_response（CLI 回應我們的 control_request，例如 initialize）
                     if msg_type == "control_response" {
-                        eprintln!("📥 control_response from CLI: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                        // 從 initialize 的成功回應中提取 commands → 轉成 Init 事件
+                        if let Some(resp) = json.get("response") {
+                            if resp.get("subtype").and_then(|s| s.as_str()) == Some("success") {
+                                if let Some(inner) = resp.get("response") {
+                                    // 提取 slash_commands（從 commands 陣列的 name 欄位）
+                                    let slash_commands = inner.get("commands")
+                                        .and_then(|arr| arr.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                                                .collect::<Vec<String>>()
+                                        });
+
+                                    // 提取 session_id（從 pid 來推斷，或者等 stdout 的 init 事件）
+                                    // init 的 control_response 沒有 session_id，但有 pid
+                                    let pid = inner.get("pid").and_then(|p| p.as_u64());
+                                    // 先發送一個只帶 slash_commands 的 Init 事件
+                                    // session_id 會在後續的 stdout init 事件中取得
+                                    if slash_commands.is_some() {
+                                        let _ = app_clone.emit("claude-event", ClaudeEvent::Init {
+                                            session_id: String::new(),
+                                            model: String::new(),
+                                            slash_commands,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
                         continue;
                     }
                     // 忽略 streamlined 類型
@@ -427,9 +455,7 @@ pub async fn start_claude(
                     let events = parser.parse(&json);
                     for evt in events {
                         // 如果是 Init 事件，儲存 session_id
-                        if let ClaudeEvent::Init { ref session_id, ref slash_commands, .. } = evt {
-                            eprintln!("📡 Emitting Init event: session={}, skills={:?}",
-                                session_id, slash_commands.as_ref().map(|s| s.len()));
+                        if let ClaudeEvent::Init { ref session_id, .. } = evt {
                             let mut proc = process_clone.lock().await;
                             proc.session_id = Some(session_id.clone());
                         }
@@ -521,7 +547,7 @@ async fn handle_control_request(
         .to_string();
 
     // Debug: 印出完整 control_request 結構
-    eprintln!("🔑 control_request: {}", serde_json::to_string_pretty(json).unwrap_or_default());
+    // 處理 Claude CLI 發來的 control_request（權限請求等）
 
     // 嘗試取得工具名稱（permission prompt 的 control_request 格式）
     let tool_name = json.get("request")
@@ -635,7 +661,7 @@ pub async fn send_control_response(
         }
     });
 
-    eprintln!("📤 control_response: {}", serde_json::to_string_pretty(&control_response).unwrap_or_default());
+    // 寫入 control_response 到 stdin
 
     let mut proc = process.lock().await;
     if let Some(ref mut stdin) = proc.stdin_writer {
@@ -730,7 +756,7 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                         });
                     }
                 } else if subtype == "compact_boundary" {
-                    eprintln!("📦 Compact boundary detected");
+                    // compact_boundary 偵測到，後續 user 訊息中會有摘要
                     // compact_boundary 本身不帶摘要，摘要在後續的 user 訊息中
                 }
             } else if let (Some(session_id), model) = (
@@ -759,7 +785,7 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
                 // assistant 事件的 message.usage 包含該次 turn 的 input/output tokens
                 // input_tokens 代表送入的完整 context 大小，是 context window 使用量的最佳近似值
                 if let Some(usage) = message.get("usage") {
-                    eprintln!("📋 assistant message.usage: {}", usage);
+                    // 更新 token 使用量追蹤
                     // input_tokens 只是 non-cached 部分，要加上 cache tokens 才是真正的 context 大小
                     let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     let cache_create = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -808,21 +834,46 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "user" => {
-            // 檢查是否是 Compact 摘要
-            let is_compact_summary = json.get("isCompactSummary")
+            // 檢查是否是 Compact 摘要（isSynthetic=true 且非 isReplay）
+            let is_synthetic = json.get("isSynthetic")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_replay = json.get("isReplay")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // 也支援舊格式 isCompactSummary
+            let is_compact_legacy = json.get("isCompactSummary")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            if is_compact_summary {
-                // 提取 Compact 摘要內容
+            if is_compact_legacy || (is_synthetic && !is_replay) {
+                // 提取 Compact 摘要內容（content 可能是字串或陣列）
                 let summary = json.get("message")
                     .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .and_then(|c| {
+                        // 字串格式
+                        if let Some(s) = c.as_str() {
+                            return Some(s.to_string());
+                        }
+                        // 陣列格式 [{"type":"text","text":"..."}]
+                        if let Some(arr) = c.as_array() {
+                            let texts: Vec<String> = arr.iter()
+                                .filter_map(|item| {
+                                    item.get("text").and_then(|t| t.as_str())
+                                        .or_else(|| item.get("content").and_then(|t| t.as_str()))
+                                        .map(|s| s.to_string())
+                                })
+                                .collect();
+                            if !texts.is_empty() {
+                                return Some(texts.join("\n"));
+                            }
+                        }
+                        None
+                    })
+                    .unwrap_or_default();
 
                 if !summary.is_empty() {
-                    eprintln!("📦 Compact summary received ({} chars)", summary.len());
+                    // Compact 摘要收到
                     events.push(ClaudeEvent::Compacted { summary });
                 }
                 return events;
@@ -971,14 +1022,6 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "result" => {
-            eprintln!("📋 Result event JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-            if let Some(mu) = json.get("modelUsage") {
-                eprintln!("📋 modelUsage: {}", mu);
-            } else {
-                eprintln!("📋 modelUsage: MISSING");
-            }
-            eprintln!("📋 last_turn tokens: in={}, out={}", self.last_turn_input_tokens, self.last_turn_output_tokens);
-
             let result = json.get("result")
                 .and_then(|r| r.as_str())
                 .unwrap_or("")
