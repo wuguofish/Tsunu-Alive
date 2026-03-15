@@ -36,6 +36,10 @@ const sessionId = ref<string | null>(null);
 // 目前使用的 model
 const currentModel = ref('');
 
+// App 版本號（由 vite.config.ts 注入）
+declare const __APP_VERSION__: string;
+const appVersion = __APP_VERSION__;
+
 // Session 白名單（這個 session 內允許的工具）
 const sessionAllowedTools = ref<Set<string>>(new Set());
 
@@ -485,6 +489,19 @@ const contextInfo = ref<{
 
 // 上一次 turn 的 input tokens（用於計算增量）
 const prevInputTokens = ref<number | null>(null);
+
+// 格式化模型名稱（例如 "claude-opus-4-6" → "Opus 4.6"）
+const modelDisplayName = computed(() => {
+  const m = currentModel.value;
+  if (!m) return '';
+  // 匹配 claude-{family}-{version} 格式
+  const match = m.match(/claude-(\w+)-(\d+)-(\d+)/);
+  if (match) {
+    const family = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+    return `${family} ${match[2]}.${match[3]}`;
+  }
+  return m;
+});
 
 // Context 用量圖示（根據用量百分比顯示不同的圓圈）
 const contextUsageIcon = computed(() => {
@@ -3125,6 +3142,10 @@ async function interruptRequest() {
         <!-- Context 資訊 -->
         <div class="slash-section">
           <div class="slash-section-title">Context</div>
+          <div v-if="modelDisplayName" class="slash-item context-info">
+            <span>Model</span>
+            <span class="slash-hint">{{ modelDisplayName }}</span>
+          </div>
           <div class="slash-item context-info">
             <span>使用量</span>
             <span class="slash-hint">{{ contextUsage !== null ? contextUsage + '%' : '—' }}</span>
@@ -3132,6 +3153,14 @@ async function interruptRequest() {
           <div v-if="contextInfo" class="slash-item context-info">
             <span>Tokens</span>
             <span class="slash-hint">{{ contextInfo.totalTokens?.toLocaleString() || '?' }} / {{ contextInfo.maxTokens?.toLocaleString() || '?' }}</span>
+          </div>
+        </div>
+
+        <!-- 版本資訊 -->
+        <div class="slash-section">
+          <div class="slash-item context-info version-info">
+            <span>Tsunu Alive</span>
+            <span class="slash-hint">v{{ appVersion }}</span>
           </div>
         </div>
       </div>

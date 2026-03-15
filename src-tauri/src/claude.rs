@@ -1070,6 +1070,9 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
 
             // 從 modelUsage 中取得 context window 大小
             let model_usage = json.get("modelUsage").and_then(|m| m.as_object());
+            if let Some(mu) = &model_usage {
+                eprintln!("📋 modelUsage raw: {:?}", mu);
+            }
             let context_window_max = model_usage.and_then(|m| {
                 // 取第一個模型的 contextWindow
                 m.values().next().and_then(|v| v.get("contextWindow")).and_then(|c| c.as_u64())

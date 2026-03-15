@@ -5,8 +5,17 @@ import vue from "@vitejs/plugin-vue";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async () => {
+  // 從 package.json 讀取版本號
+  const { version } = await import('./package.json');
+
+  return {
   plugins: [vue()],
+
+  // 注入 APP 版本號到前端
+  define: {
+    __APP_VERSION__: JSON.stringify(version),
+  },
 
   // Tauri 桌面應用不走網路載入，單一 chunk 不影響效能
   build: {
@@ -34,4 +43,5 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-}));
+};
+});
