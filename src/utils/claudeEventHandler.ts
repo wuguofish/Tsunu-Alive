@@ -15,7 +15,7 @@ export interface DiffHunk {
 
 // Claude CLI 事件類型
 export interface ClaudeEvent {
-  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'Connected' | 'Compacted' | 'ProcessExited';
+  event_type: 'Init' | 'Text' | 'ToolUse' | 'ToolResult' | 'Complete' | 'Error' | 'ApiError' | 'Connected' | 'Compacted' | 'ProcessExited';
   session_id?: string;
   model?: string;
   // 可用的 Skills（Init 事件）
@@ -28,6 +28,8 @@ export interface ClaudeEvent {
   is_error?: boolean;
   cost_usd?: number;
   message?: string;
+  // API 錯誤代碼（ApiError 事件）
+  error_code?: string;
   // Context 相關資訊（Complete 事件）
   total_tokens_in_conversation?: number;
   context_window_max?: number;
@@ -139,7 +141,8 @@ export type EventAction =
   | { type: 'stopBusyTextAnimation' }
   | { type: 'startCompleteTimer' }
   | { type: 'addErrorMessage'; message: string }
-  | { type: 'showToast'; message: string; variant?: 'info' | 'warning' | 'error' };
+  | { type: 'showToast'; message: string; variant?: 'info' | 'warning' | 'error' }
+  | { type: 'autoCompactAndRetry' };
 
 /**
  * 處理 Init 事件
@@ -416,6 +419,15 @@ export function handleCompleteEvent(
     }
   }
 
+  // Context 使用量超過 90% 時發出警告
+  if (event.context_window_used_percent !== undefined && event.context_window_used_percent >= 90) {
+    actions.push({
+      type: 'showToast',
+      message: `Context 使用量已達 ${Math.round(event.context_window_used_percent)}%，建議執行 /compact`,
+      variant: 'warning',
+    });
+  }
+
   // 檢測 "Unknown skill: xxx" - CLI-only 命令提示
   if (event.result) {
     const unknownSkillMatch = event.result.match(/^Unknown skill:\s*(\w+)/);
@@ -449,6 +461,35 @@ export function handleErrorEvent(
     stateUpdates: {
       isLoading: false,
       avatarState: 'error',  // 出錯時顯示緊張表情
+    },
+    actions,
+  };
+}
+
+/**
+ * 處理 ApiError 事件（API 層級錯誤，如 "Request too large"）
+ * 與一般 Error 不同：ApiError 帶有 error_code，可觸發自動恢復
+ */
+export function handleApiErrorEvent(
+  event: ClaudeEvent,
+  _state: AppState
+): EventHandlerResult {
+  const isRequestTooLarge = event.message?.includes('Request too large');
+
+  const actions: EventAction[] = [
+    { type: 'stopBusyTextAnimation' },
+    { type: 'addErrorMessage', message: event.message || 'API 錯誤' },
+  ];
+
+  // Request too large：觸發自動 compact 嘗試恢復對話
+  if (isRequestTooLarge) {
+    actions.push({ type: 'autoCompactAndRetry' });
+  }
+
+  return {
+    stateUpdates: {
+      isLoading: false,
+      avatarState: 'error',
     },
     actions,
   };
@@ -550,6 +591,8 @@ export function handleClaudeEvent(
       return handleCompleteEvent(event, state);
     case 'Error':
       return handleErrorEvent(event, state);
+    case 'ApiError':
+      return handleApiErrorEvent(event, state);
     case 'Connected':
       return handleConnectedEvent(event, state);
     case 'ProcessExited':

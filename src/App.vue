@@ -726,6 +726,21 @@ function applyEventResult(result: { stateUpdates: Partial<AppState>; actions: Ev
       case 'showToast':
         showToast(action.message, action.variant || 'info');
         break;
+      case 'autoCompactAndRetry':
+        // Context 超過 API 大小限制，嘗試自動 compact 恢復對話
+        showToast('Context 超過大小限制，正在自動壓縮...', 'warning');
+        setTimeout(async () => {
+          try {
+            await ensureProcess();
+            await invoke('send_message', { message: '/compact' });
+            isLoading.value = true;
+            avatarState.value = 'thinking';
+          } catch (e) {
+            console.error('Auto-compact failed:', e);
+            showToast('自動壓縮失敗，建議開啟新對話', 'error');
+          }
+        }, 1000);
+        break;
     }
   }
 }

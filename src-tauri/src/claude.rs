@@ -60,6 +60,11 @@ pub enum ClaudeEvent {
     Compacted {
         summary: String,
     },
+    // API 錯誤（isApiErrorMessage: true，例如 "Request too large"）
+    ApiError {
+        error_code: String,
+        message: String,
+    },
     // 錯誤
     Error {
         message: String,
@@ -780,6 +785,34 @@ fn parse(&mut self, json: &serde_json::Value) -> Vec<ClaudeEvent> {
             }
         }
         "assistant" => {
+            // 優先檢查是否是 API 錯誤訊息（例如 "Request too large"）
+            let is_api_error = json.get("isApiErrorMessage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if is_api_error {
+                let error_code = json.get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                // 從 message.content[0].text 提取錯誤訊息
+                let message_text = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|item| item.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown API error")
+                    .to_string();
+
+                eprintln!("⚠️ API error detected: [{}] {}", error_code, message_text);
+                events.push(ClaudeEvent::ApiError {
+                    error_code,
+                    message: message_text,
+                });
+                return events;
+            }
+
             if let Some(message) = json.get("message") {
                 // 追蹤每個 turn 的 token 用量
                 // assistant 事件的 message.usage 包含該次 turn 的 input/output tokens
@@ -1457,5 +1490,77 @@ mod tests {
         assert!(init_msg["appendSystemPrompt"].as_str().unwrap().contains("tsunu_alive"));
         assert!(init_msg["hooks"].is_object());
         assert!(init_msg["sdkMcpServers"].is_object());
+    }
+
+    #[test]
+    fn test_parse_api_error_event() {
+        // 模擬 CLI 送出的 "Request too large" API 錯誤
+        let json = json!({
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "error": "invalid_request",
+            "message": {
+                "model": "<synthetic>",
+                "role": "assistant",
+                "stop_reason": "stop_sequence",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Request too large (max 20MB). Try with a smaller file."
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+
+        let events = parse_claude_output(&json);
+        assert_eq!(events.len(), 1);
+
+        match &events[0] {
+            ClaudeEvent::ApiError { error_code, message } => {
+                assert_eq!(error_code, "invalid_request");
+                assert!(message.contains("Request too large"));
+            }
+            _ => panic!("Expected ApiError event, got {:?}", events[0]),
+        }
+    }
+
+    #[test]
+    fn test_parse_api_error_not_triggered_for_normal_assistant() {
+        // 一般 assistant 訊息不應被誤判為 API 錯誤
+        let json = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Hello, world!"
+                    }
+                ],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+
+        let events = parse_claude_output(&json);
+        assert!(!events.is_empty());
+
+        // 不應該是 ApiError
+        for event in &events {
+            match event {
+                ClaudeEvent::ApiError { .. } => panic!("Normal assistant should not be ApiError"),
+                _ => {}
+            }
+        }
     }
 }
