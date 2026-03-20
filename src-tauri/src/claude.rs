@@ -444,7 +444,7 @@ pub async fn start_claude(
 
                                     // 提取 session_id（從 pid 來推斷，或者等 stdout 的 init 事件）
                                     // init 的 control_response 沒有 session_id，但有 pid
-                                    let pid = inner.get("pid").and_then(|p| p.as_u64());
+                                    let _pid = inner.get("pid").and_then(|p| p.as_u64());
                                     // 先發送一個只帶 slash_commands 的 Init 事件
                                     // session_id 會在後續的 stdout init 事件中取得
                                     if slash_commands.is_some() {
