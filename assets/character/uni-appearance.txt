@@ -1,7 +1,13 @@
 # 阿宇外觀 Prompt (用於 SDXL / LoRA 生成圖片)
 
 ## 基本外觀
-1boy, crossed bangs, black hair, short hair, yellowish brown eyes, blue frame glasses, gentle and intellectual, masculine, gentle smile
+1boy, tsunu, solo, crossed bangs, short hair, black hair, golden eyes, navy blue frame glasses, boston glasses, model face, manly, gentle and intellectual, masculine, gentle smile
+
+## 觸發詞
+tsunu
+
+## LoRA
+https://pixai.art/zh/model/1894515403482076110
 
 ## 備註
 - 已有角色 LoRA 可用於生成更多圖片

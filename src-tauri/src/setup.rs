@@ -632,6 +632,54 @@ pub fn install_jetbrains_plugin(app: tauri::AppHandle, plugins_path: String, con
     Ok("JetBrains Plugin installed successfully. Please restart your IDE.".to_string())
 }
 
+/// 檢查 Discord 插件是否已安裝且啟用
+/// 透過 `claude plugin list` 指令的輸出判斷
+#[tauri::command]
+pub fn check_discord_plugin() -> bool {
+    // 使用與 create_claude_command 相同的路徑偵測邏輯
+    let output = {
+        #[cfg(target_os = "windows")]
+        {
+            // 優先使用 node + cli.js（跟 claude.rs 一致）
+            let cli_js = which::which("claude.cmd").ok().and_then(|cmd_path| {
+                cmd_path.parent().map(|dir| {
+                    dir.join("node_modules")
+                        .join("@anthropic-ai")
+                        .join("claude-code")
+                        .join("cli.js")
+                })
+            }).filter(|p| p.exists());
+
+            if let Some(cli_js) = cli_js {
+                Command::new("node")
+                    .arg(&cli_js)
+                    .args(["plugin", "list"])
+                    .output()
+            } else {
+                Command::new("claude.exe")
+                    .args(["plugin", "list"])
+                    .output()
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new("claude")
+                .args(["plugin", "list"])
+                .output()
+        }
+    };
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // 確認 discord@claude-plugins-official 存在且為 enabled
+            stdout.contains("discord@claude-plugins-official")
+                && stdout.contains("enabled")
+        }
+        _ => false,
+    }
+}
+
 /// 檢查是否首次啟動（setup 是否已完成）
 #[tauri::command]
 pub fn check_setup_done() -> bool {

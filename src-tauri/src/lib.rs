@@ -33,11 +33,12 @@ async fn start_claude(
     session_id: Option<String>,
     permission_mode: Option<String>,
     thinking_mode: Option<String>,
+    channels: Option<Vec<String>>,
 ) -> Result<(), String> {
-    eprintln!("🚀 start_claude called: working_dir={:?}, session_id={:?}, permission_mode={:?}, thinking_mode={:?}",
-        working_dir, session_id, permission_mode, thinking_mode);
+    eprintln!("🚀 start_claude called: working_dir={:?}, session_id={:?}, permission_mode={:?}, thinking_mode={:?}, channels={:?}",
+        working_dir, session_id, permission_mode, thinking_mode, channels);
     let process = state.claude_process.clone();
-    claude::start_claude(app, process, working_dir, session_id, permission_mode, thinking_mode).await
+    claude::start_claude(app, process, working_dir, session_id, permission_mode, thinking_mode, channels).await
 }
 
 /// 發送訊息給 Claude（互動模式）
@@ -1645,6 +1646,7 @@ pub fn run() {
             setup::install_vscode_extension,
             setup::install_skill,
             setup::install_jetbrains_plugin,
+            setup::check_discord_plugin,
             setup::check_setup_done,
             setup::mark_setup_done
         ])

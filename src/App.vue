@@ -355,6 +355,19 @@ function toggleThinkingMode() {
   markProcessForRespawn();
 }
 
+// 切換 Discord Channel（開/關）
+const DISCORD_CHANNEL = 'plugin:discord@claude-plugins-official';
+function toggleDiscordChannel() {
+  const idx = enabledChannels.value.indexOf(DISCORD_CHANNEL);
+  if (idx >= 0) {
+    enabledChannels.value.splice(idx, 1);
+  } else {
+    enabledChannels.value.push(DISCORD_CHANNEL);
+  }
+  console.log('🎮 Discord Channel:', enabledChannels.value.length > 0 ? 'ON' : 'OFF');
+  markProcessForRespawn();
+}
+
 // 互動模式：設定變更時標記 process 需要 respawn
 // 不立即中斷，等下次送訊息時 ensureProcess() 自然重新啟動
 const pendingRespawn = ref(false);  // loading 中切模式時排隊，等 Complete 後再 respawn
@@ -383,6 +396,11 @@ async function doRespawn() {
   }
   isProcessAlive.value = false;
 }
+
+// Channels（Discord 等即時通訊插件）
+const enabledChannels = ref<string[]>([]);
+// Discord 插件是否已安裝且啟用
+const discordPluginAvailable = ref(false);
 
 // 工作目錄
 const workingDir = ref<string | null>(null);
@@ -547,6 +565,17 @@ async function refreshAddonStatus() {
     addonStatus.value = await invoke<AddonStatus>('check_addon_status');
   } catch (e) {
     console.error('Failed to check addon status:', e);
+  }
+}
+
+// Discord 插件偵測
+async function checkDiscordPlugin() {
+  try {
+    discordPluginAvailable.value = await invoke<boolean>('check_discord_plugin');
+    console.log('🎮 Discord plugin available:', discordPluginAvailable.value);
+  } catch (e) {
+    console.warn('Failed to check Discord plugin:', e);
+    discordPluginAvailable.value = false;
   }
 }
 
@@ -1406,7 +1435,8 @@ onMounted(async () => {
   startIdeStatusPolling();
 
   // 附加組件狀態偵測（同時用於首次啟動判斷和狀態列顯示）
-  await refreshAddonStatus();
+  // Discord 插件偵測與附加組件狀態可以並行
+  await Promise.all([refreshAddonStatus(), checkDiscordPlugin()]);
   try {
     const setupDone = await invoke<boolean>('check_setup_done');
     if (!setupDone) {
@@ -1455,6 +1485,7 @@ async function ensureProcess(): Promise<void> {
     sessionId: sessionId.value || null,
     permissionMode: permissionMode,
     thinkingMode: thinkingMode.value === 'off' ? null : thinkingMode.value,
+    channels: enabledChannels.value.length > 0 ? enabledChannels.value : null,
   });
 
   isProcessAlive.value = true;
@@ -3032,7 +3063,17 @@ async function interruptRequest() {
           >
             <span class="thinking-icon">💭</span>
             <span class="thinking-label">{{ thinkingMode === 'off' ? 'Thinking' : thinkingMode === 'adaptive' ? 'Adaptive' : 'Enabled' }}</span>
-          </button>          
+          </button>
+          <button
+            v-if="discordPluginAvailable"
+            class="status-btn discord-toggle"
+            :class="{ active: enabledChannels.length > 0 }"
+            @click="toggleDiscordChannel"
+            :title="enabledChannels.length > 0 ? 'Discord Channel: ON（點擊關閉）' : 'Discord Channel: OFF（點擊開啟）'"
+          >
+            <span class="discord-icon">🎮</span>
+            <span class="discord-label">{{ enabledChannels.length > 0 ? 'Discord: on' : 'Discord: off' }}</span>
+          </button>
           <button
             class="status-btn ide-status"
             :class="{
@@ -3855,6 +3896,20 @@ textarea:disabled {
 .dir-icon,
 .usage-icon {
   font-size: 0.75rem;
+}
+
+/* Discord Channel 按鈕 */
+.discord-toggle {
+  transition: all 0.2s;
+}
+
+.discord-toggle.active {
+  color: #5865f2;
+  background-color: rgba(88, 101, 242, 0.15);
+}
+
+.discord-toggle.active .discord-icon {
+  animation: thinking-pulse 1.5s infinite;
 }
 
 /* Extended Thinking 按鈕 */

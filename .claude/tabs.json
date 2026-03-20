@@ -1,5 +1,5 @@
 {
-  "activeTabId": "l7PRkT49_zrdvjptp4oJe",
+  "activeTabId": "cDUnCGQo-nmnlXf7oYy0l",
   "tabs": [
     {
       "createdAt": "2026-03-04T05:21:13.485Z",
@@ -14,6 +14,34 @@
       "order": 1,
       "sessionId": "9f17eb9d-cfe7-458b-b457-37285c9506c7",
       "title": "我覺得該來寫Pycharm的外掛，好讓使用者用IntelliJ的時候，也可以知道目前選取哪一段程式碼..."
+    },
+    {
+      "createdAt": "2026-03-12T09:11:07.544Z",
+      "id": "cDUnCGQo-nmnlXf7oYy0l",
+      "order": 2,
+      "sessionId": "74fe8e19-8052-4107-bb22-8961a9d0513b",
+      "title": "跟使用者說「哈囉」"
+    },
+    {
+      "createdAt": "2026-03-13T02:37:37.234Z",
+      "id": "r5sFsBcsqbb2b9um1JtfJ",
+      "order": 3,
+      "sessionId": "ad41cf46-66d1-4c46-b3d9-d9c008d62502",
+      "title": "This session is being continued from a previous co..."
+    },
+    {
+      "createdAt": "2026-03-13T03:36:45.259Z",
+      "id": "BqobzFM9Jbxsg4ls01rQY",
+      "order": 4,
+      "sessionId": null,
+      "title": "新對話"
+    },
+    {
+      "createdAt": "2026-03-13T03:40:23.192Z",
+      "id": "wzQG5K5xKxYKa5zGkqfTh",
+      "order": 5,
+      "sessionId": "f44ab115-b42c-461e-83a1-472c99918488",
+      "title": "新對話"
     }
   ],
   "version": 1

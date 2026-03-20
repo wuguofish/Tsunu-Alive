@@ -286,6 +286,7 @@ pub async fn start_claude(
     session_id: Option<String>,
     permission_mode: Option<String>,
     thinking_mode: Option<String>,
+    channels: Option<Vec<String>>,
 ) -> Result<(), String> {
     // 先中斷舊的 process（如果有的話）
     {
@@ -330,6 +331,13 @@ pub async fn start_claude(
     if let Some(ref mode) = thinking_mode {
         if mode != "off" {
             cmd.arg("--thinking").arg(mode);
+        }
+    }
+
+    // Channels（例如 Discord 插件的即時通訊模式）
+    if let Some(ref ch_list) = channels {
+        for ch in ch_list {
+            cmd.arg("--channels").arg(ch);
         }
     }
 
