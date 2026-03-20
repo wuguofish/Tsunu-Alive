@@ -20,7 +20,9 @@ use tauri::{AppHandle, Emitter};
 pub struct PermissionRequest {
     pub tool_name: String,
     pub tool_input: serde_json::Value,
-    pub tool_use_id: String,
+    /// Channel-triggered 的工具呼叫可能沒有 tool_use_id（為 null）
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
     pub session_id: Option<String>,
 }
 
@@ -189,8 +191,13 @@ async fn handle_permission_request(
     State(state): State<SharedPermissionState>,
     Json(req): Json<PermissionRequest>,
 ) -> Result<Json<PermissionResponse>, StatusCode> {
+    // Channel-triggered 的工具呼叫 tool_use_id 可能為 null，生成 fallback ID
+    let tool_use_id = req.tool_use_id.clone()
+        .unwrap_or_else(|| format!("channel-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+
     // 診斷日誌：收到權限請求
-    eprintln!("📥 Permission request received: tool={}, id={}", req.tool_name, req.tool_use_id);
+    eprintln!("📥 Permission request received: tool={}, id={}", req.tool_name, tool_use_id);
 
     // 檢查是否是不需要確認的工具
     if AUTO_ALLOW_TOOLS.contains(&req.tool_name.as_str()) {
@@ -225,7 +232,7 @@ async fn handle_permission_request(
 
     // 建立 oneshot channel 等待用戶決策
     let (tx, rx) = oneshot::channel();
-    state_guard.pending.insert(req.tool_use_id.clone(), tx);
+    state_guard.pending.insert(tool_use_id.clone(), tx);
 
     // 發送事件到前端
     if let Some(app) = &state_guard.app_handle {
@@ -240,21 +247,21 @@ async fn handle_permission_request(
                 .map(|s| s.to_string());
 
             let event = PlanApprovalEvent {
-                tool_use_id: req.tool_use_id.clone(),
+                tool_use_id: tool_use_id.clone(),
                 plan_content,
                 plan_file_path,
             };
-            eprintln!("📤 Emitting plan-approval-request event: id={}", req.tool_use_id);
+            eprintln!("📤 Emitting plan-approval-request event: id={}", tool_use_id);
             let _ = app.emit("plan-approval-request", &event);
         } else {
             // 一般權限請求事件
             let event = PermissionRequestEvent {
                 tool_name: req.tool_name.clone(),
                 tool_input: req.tool_input.clone(),
-                tool_use_id: req.tool_use_id.clone(),
+                tool_use_id: tool_use_id.clone(),
                 session_id: req.session_id.clone(),
             };
-            eprintln!("📤 Emitting permission-request event: tool={}, id={}", req.tool_name, req.tool_use_id);
+            eprintln!("📤 Emitting permission-request event: tool={}, id={}", req.tool_name, tool_use_id);
             let _ = app.emit("permission-request", &event);
         }
     } else {
@@ -279,7 +286,7 @@ async fn handle_permission_request(
             // Timeout
             // 清理 pending 請求
             let mut state_guard = state.lock().await;
-            state_guard.pending.remove(&req.tool_use_id);
+            state_guard.pending.remove(&tool_use_id);
 
             Ok(Json(PermissionResponse {
                 behavior: "deny".to_string(),

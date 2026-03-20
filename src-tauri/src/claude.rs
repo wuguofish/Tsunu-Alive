@@ -339,6 +339,10 @@ pub async fn start_claude(
         for ch in ch_list {
             cmd.arg("--channels").arg(ch);
         }
+        // Discord 插件的 MCP server 使用 Ink（terminal UI 框架），
+        // 在非 TTY 環境下會因為無法設定 raw mode 而 crash。
+        // 設定 CI=true 讓 Ink 跳過互動式 UI，改用 CI-friendly 模式。
+        cmd.env("CI", "true");
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
@@ -410,10 +414,30 @@ pub async fn start_claude(
         let mut reader = BufReader::new(stdout).lines();
         let mut parser = ClaudeEventParser::new();
 
+        // Raw log：記錄所有 CLI stdout 到檔案（debug 用）
+        let raw_log_path = std::env::temp_dir().join("tsunu_claude_raw.log");
+        let mut raw_log = tokio::fs::OpenOptions::new()
+            .create(true).append(true).open(&raw_log_path).await.ok();
+
         while let Ok(Some(line)) = reader.next_line().await {
             if line.trim().is_empty() {
                 continue;
             }
+
+            // 寫入 raw log
+            if let Some(ref mut f) = raw_log {
+                let _ = tokio::io::AsyncWriteExt::write_all(f, format!("{}\n", line).as_bytes()).await;
+            }
+
+            // 印到 terminal（截斷避免刷爆）
+            let msg_type_preview = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!("📥 CLI stdout [{}]: {}",
+                msg_type_preview,
+                if line.len() > 300 { format!("{}...({}chars)", &line[..line.char_indices().nth(200).map(|(i,_)|i).unwrap_or(200)], line.len()) } else { line.clone() }
+            );
 
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(json) => {
