@@ -30,6 +30,14 @@ Tsunu Alive 是一個桌面應用程式，將 [Claude Code](https://docs.anthrop
 
 ---
 
+## Lite 版本
+
+想要完整支援 Claude Code 原生功能（`/ide`、`/compact`、Discord Channel 等）？試試 **[Tsunu Alive Lite](https://github.com/wuguofish/Tsunu-Alive-lite)**！
+
+Lite 版直接嵌入 xterm.js 終端機，保留 Claude CLI 的原生體驗，同時有阿宇 Avatar 陪伴。維護成本低，CLI 更新不用跟進。
+
+---
+
 ## 安裝
 
 ### 前提條件
