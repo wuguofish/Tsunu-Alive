@@ -3065,7 +3065,7 @@ async function interruptRequest() {
             <span class="thinking-label">{{ thinkingMode === 'off' ? 'Thinking' : thinkingMode === 'adaptive' ? 'Adaptive' : 'Enabled' }}</span>
           </button>
           <button
-            v-if="discordPluginAvailable"
+            v-if="false /* Discord Channel 暫時隱藏：stream-json 模式不支援 channel stdout (#36001, #36657) */"
             class="status-btn discord-toggle"
             :class="{ active: enabledChannels.length > 0 }"
             @click="toggleDiscordChannel"
